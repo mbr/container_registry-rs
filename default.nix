@@ -31,11 +31,10 @@ in rustPlatform.buildRustPackage {
   nativeBuildInputs = with pkgs; [ podman ]
     ++ (if isMacOS then with darwin.apple_sdk.frameworks; [ SystemConfiguration qemu ] else []);
   buildPhase = ''
-    cargo build --release --offline --target=${target}
+    cargo build --release --offline --target=${target} --features bin
   '';
   installPhase = ''
     mkdir -p $out/bin
-    cp target/${target}/release/${cargoToml.package.name} $out/bin
+    cp target/${target}/release/container-registry $out/bin
   '';
-  PODMAN_IS_REMOTE=if isMacOS then "true" else "false";
 }
