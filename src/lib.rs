@@ -610,13 +610,13 @@ mod tests {
     };
     use base64::Engine;
     use http_body_util::BodyExt;
+    use sec::Secret;
     use tempdir::TempDir;
     use tokio::io::AsyncWriteExt;
     use tower::{util::ServiceExt, Service};
     use tower_http::trace::TraceLayer;
 
     use crate::{
-        auth::MasterKey,
         storage::{ImageLocation, ManifestReference, Reference},
         ImageDigest,
     };
@@ -647,7 +647,7 @@ mod tests {
         let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
 
         let password = "random-test-password".to_owned();
-        let master_key = Arc::new(MasterKey::new_key(password.clone()));
+        let master_key = Arc::new(Secret::new(password.clone()));
 
         let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), master_key)
             .expect("should not fail to create app");
