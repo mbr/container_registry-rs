@@ -2,15 +2,31 @@
 
 //! ## Getting started
 //!
-//! To use this crate as a library, use the [`ContainerRegistry`] type. Here is a minimal example:
+//! To use this crate as a library, use the [`ContainerRegistry`] type. Here is a minimal example,
+//! supplying a unit value (`()`) to indicate it does not use any hooks, and `true` as the auth
+//! provider, which will accept any username and password combination as valid:
 //!
 //! ```
+//!# use axum::{extract::DefaultBodyLimit, Router};
+//! // The registry requires an existing (empty) directory, which it will initialize.
+//! let storage = tempdir::TempDir::new("container_registry_test")
+//!     .expect("could not create storage dir");
+//!
+//! // Instantiate the registry.
 //! let registry = container_registry::ContainerRegistry::new(
-//!     "./storage",
+//!     storage.path(),
 //!     Box::new(()),
 //!     std::sync::Arc::new(true)
-//! );
+//! ).expect("failed to instantiate registry");
+//!
+//! // Create an axum app router and mount our new registry on it.
+//! let app = Router::new()
+//!     .merge(registry.make_router())
+//!     // 1 GB body limit.
+//!     .layer(DefaultBodyLimit::max(1024 * 1024 * 1024));
 //! ```
+//!
+//! Afterwards, `app` can be launched via [`axum::serve()`], see its documentation for details.
 
 pub mod auth;
 pub mod hooks;
@@ -180,7 +196,7 @@ impl ContainerRegistry {
     ///
     /// Produces the core entry point for the registry; create and mount the router into an `axum`
     /// application to use it.
-    pub(crate) fn make_router(self: Arc<ContainerRegistry>) -> Router {
+    pub fn make_router(self: Arc<ContainerRegistry>) -> Router {
         Router::new()
             .route("/v2/", get(index_v2))
             .route("/v2/:repository/:image/blobs/:digest", head(blob_check))
