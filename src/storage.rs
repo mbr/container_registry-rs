@@ -1,3 +1,9 @@
+//! Storage backends.
+//!
+//! The `container_registry` crate has somewhat modular storage backends, but currently nothing but
+//! filesystem storage is supported. Contact the author if you'd like to see this change.
+// Note: This module is in worse shape, documentation wise, than the rest. Cleaning this up is the
+//       first step towards supporting custom implementations.
 use std::{
     fmt::{self, Display},
     fs,
@@ -15,20 +21,25 @@ use uuid::Uuid;
 
 use super::{types::ImageManifest, ImageDigest};
 
-const SHA256_LEN: usize = 32;
+/// Length of a SHA256 hash in bytes.
+pub const SHA256_LEN: usize = 32;
 
 const BUFFER_SIZE: usize = 1024 * 1024; // 1 MiB
 
-// TODO: Maybe use `ImageDigest` directly?
+/// An SHA256 digest.
+///
+/// The `container_registry` crate supports only `sha256` digests at this time.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Serialize)]
-pub(crate) struct Digest([u8; SHA256_LEN]);
+pub struct Digest([u8; SHA256_LEN]);
 
 impl Digest {
-    pub(crate) const fn new(bytes: [u8; SHA256_LEN]) -> Self {
+    /// Creates a digest from an existing hash.
+    pub const fn new(bytes: [u8; SHA256_LEN]) -> Self {
         Self(bytes)
     }
 
-    pub(crate) fn from_contents(contents: &[u8]) -> Self {
+    /// Creates a digest by hashing given contents.
+    pub fn from_contents(contents: &[u8]) -> Self {
         let mut hasher = sha2::Sha256::new();
         hasher.update(contents);
 
@@ -49,9 +60,17 @@ struct LayerManifest {
     blob_sum: String,
 }
 
+/// Location of a given image.
+///
+/// In an open container registry, images are stored in what `container-registry` calls
+/// "repository" and "image" pairs. For example, the container image specified as
+/// `bitnami/nginx:latest` would have a repository of `bitnami`, image of `nginx` and tag (which
+/// is not part of [`ImageLocation`] of `latest`.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub(crate) struct ImageLocation {
+pub struct ImageLocation {
+    /// The repository part of the image location.
     repository: String,
+    /// The image part of the image location.
     image: String,
 }
 
@@ -61,6 +80,10 @@ impl Display for ImageLocation {
     }
 }
 
+/// Refers to a specific manifest.
+///
+/// Combines an [`ImageLocation`] with a [`Reference`], e.g. `bitnami/nginx:latest`, which has an
+/// [`ImageLocation`] portion of `bitnami/nginx` and a [`Reference::Tag`] `latest`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ManifestReference {
     #[serde(flatten)]
@@ -75,19 +98,21 @@ impl Display for ManifestReference {
 }
 
 impl ManifestReference {
-    #[allow(dead_code)] // TODO
-    pub(crate) fn new(location: ImageLocation, reference: Reference) -> Self {
+    /// Creates a new manifest reference.
+    pub fn new(location: ImageLocation, reference: Reference) -> Self {
         Self {
             location,
             reference,
         }
     }
 
-    pub(crate) fn location(&self) -> &ImageLocation {
+    /// Returns the location portion of the image location.
+    pub fn location(&self) -> &ImageLocation {
         &self.location
     }
 
-    pub(crate) fn reference(&self) -> &Reference {
+    /// Returns the reference portion of the image location.
+    pub fn reference(&self) -> &Reference {
         &self.reference
     }
 
@@ -100,25 +125,30 @@ impl ManifestReference {
 }
 
 impl ImageLocation {
-    #[allow(dead_code)] // TODO
-    pub(crate) fn new(repository: String, image: String) -> Self {
+    /// Creates a new image location.
+    pub fn new(repository: String, image: String) -> Self {
         Self { repository, image }
     }
 
+    /// Returns the repository portion of the given image location.
     #[inline(always)]
-    pub(crate) fn repository(&self) -> &str {
+    pub fn repository(&self) -> &str {
         self.repository.as_ref()
     }
 
+    /// Returns the image portion of the given image location.
     #[inline(always)]
-    pub(crate) fn image(&self) -> &str {
+    pub fn image(&self) -> &str {
         self.image.as_ref()
     }
 }
 
+/// Reference to a specific version of an image.
 #[derive(Clone, Debug)]
-pub(crate) enum Reference {
+pub enum Reference {
+    /// Image reference by given tag (e.g. `latest`).
     Tag(String),
+    /// Image referenced by given specific hash.
     Digest(Digest),
 }
 
@@ -149,19 +179,20 @@ impl Serialize for Reference {
 }
 
 impl Reference {
+    /// Creates a new by-tag reference.
     #[inline(always)]
-    #[allow(dead_code)] // TODO
-    pub(crate) fn new_tag<S: ToString>(s: S) -> Self {
+    pub fn new_tag<S: ToString>(s: S) -> Self {
         Reference::Tag(s.to_string())
     }
 
+    /// Creats a new by-hash reference.
     #[inline(always)]
-    #[allow(dead_code)] // TODO
-    pub(crate) fn new_digest(d: Digest) -> Self {
+    pub fn new_digest(d: Digest) -> Self {
         Reference::Digest(d)
     }
 
-    fn as_tag(&self) -> Option<&str> {
+    /// Returns reference as naked tag, if it is a tag.
+    pub fn as_tag(&self) -> Option<&str> {
         match self {
             Reference::Tag(tag) => Some(tag),
             Reference::Digest(_) => None,
@@ -258,14 +289,17 @@ pub(crate) trait RegistryStorage: Send + Sync {
     ) -> Result<Digest, Error>;
 }
 
+/// A filesystem backend error.
 #[derive(Debug, Error)]
 pub enum FilesystemStorageError {
+    /// The storage path given could not be canonicalized.
     #[error("could not canonicalize root {}", path.display())]
     CouldNotCanonicalizeRoot {
         path: PathBuf,
         #[source]
         err: io::Error,
     },
+    /// Failed to create directory in storage path.
     #[error("could not create directory {}", path.display())]
     FailedToCreateDir {
         path: PathBuf,

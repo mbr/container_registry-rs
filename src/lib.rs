@@ -170,12 +170,11 @@ impl ContainerRegistry {
     /// Creates a new instance of the container registry.
     ///
     /// The instance uses the filesystem as the backend to store manifests and blobs, and requires
-    /// an [`AuthProvider`] and [`RegistryHooks`] to provided.
+    /// an [`AuthProvider`] and [`RegistryHooks`] to provided. Note that it is possible to supply
+    /// `()` for both `hooks` and `auth_provider`.
     ///
-    /// Note that it is possible to supply `()` for both `hooks` and `auth_provider`.
-    ///
-    // Note: The current implementation defaults to a filesystem based storage backend. It is
-    //       conceivable to implement other backends, but currently neither supported nor tested.
+    /// The current implementation defaults to a filesystem based storage backend at
+    /// `storage_path`. It is conceivable to implement other backends, but currently not supported.
     pub fn new<P>(
         storage_path: P,
         hooks: Box<dyn RegistryHooks>,
