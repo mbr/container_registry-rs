@@ -65,12 +65,13 @@ impl<S> FromRequestParts<S> for UnverifiedCredentials {
 ///
 /// Newtype used to avoid accidentally granting access from unverified credentials.
 #[derive(Debug)]
-pub(crate) struct ValidUser(UnverifiedCredentials);
+pub struct ValidUser(String);
 
 impl ValidUser {
-    #[allow(dead_code)] // TODO
-    pub(crate) fn username(&self) -> &str {
-        &self.0.username
+    /// Returns the valid user's username.
+    #[inline(always)]
+    pub fn username(&self) -> &str {
+        &self.0
     }
 }
 
@@ -88,7 +89,7 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
         if !state.auth_provider.check_credentials(&unverified).await {
             Err(StatusCode::UNAUTHORIZED)
         } else {
-            Ok(Self(unverified))
+            Ok(Self(unverified.username))
         }
     }
 }
