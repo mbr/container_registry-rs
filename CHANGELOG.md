@@ -10,3 +10,7 @@
 ### Fixed
 
 * The buffer size for uploads is now 1 megabyte, as intended, not 1 gigabyte.
+
+### Removed
+
+* Auth providers no longer contain dummy functionality that (falsely) hints at authorization checks (`has_access_to` has been removed).

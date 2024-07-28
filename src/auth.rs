@@ -102,21 +102,11 @@ pub trait AuthProvider: Send + Sync {
     ///
     /// Must return `true` if and only if the given unverified credentials are valid.
     async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool;
-
-    /// Checks if the given user has access to the given repo.
-    ///
-    /// Must return `true` if and only if the given `username`` is allowed to access the
-    /// `namespace` and `image`.
-    async fn has_access_to(&self, username: &str, namespace: &str, image: &str) -> bool;
 }
 
 #[async_trait]
 impl AuthProvider for bool {
     async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> bool {
-        *self
-    }
-
-    async fn has_access_to(&self, _username: &str, _namespace: &str, _image: &str) -> bool {
         *self
     }
 }
@@ -139,10 +129,6 @@ impl AuthProvider for HashMap<String, Secret<String>> {
 
         false
     }
-
-    async fn has_access_to(&self, _username: &str, _namespace: &str, _image: &str) -> bool {
-        true
-    }
 }
 
 #[async_trait]
@@ -154,11 +140,6 @@ where
     async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
-
-    #[inline(always)]
-    async fn has_access_to(&self, username: &str, namespace: &str, image: &str) -> bool {
-        <T as AuthProvider>::has_access_to(self, username, namespace, image).await
-    }
 }
 
 #[async_trait]
@@ -169,11 +150,6 @@ where
     #[inline(always)]
     async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
         <T as AuthProvider>::check_credentials(self, creds).await
-    }
-
-    #[inline(always)]
-    async fn has_access_to(&self, username: &str, namespace: &str, image: &str) -> bool {
-        <T as AuthProvider>::has_access_to(self, username, namespace, image).await
     }
 }
 
@@ -210,12 +186,6 @@ impl AuthProvider for MasterKey {
                 sec_pw.reveal_str().as_bytes(),
             ),
         }
-    }
-
-    /// Check if the given user has access to the given repo.
-    #[inline]
-    async fn has_access_to(&self, _username: &str, _namespace: &str, _image: &str) -> bool {
-        true
     }
 }
 
