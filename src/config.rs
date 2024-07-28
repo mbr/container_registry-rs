@@ -18,10 +18,6 @@ pub(crate) struct Config {
     pub rockslide: RockslideConfig,
     #[serde(default)]
     pub registry: RegistryConfig,
-    #[serde(default)]
-    pub containers: ContainerConfig,
-    #[serde(default)]
-    pub reverse_proxy: ReverseProxyConfig,
 }
 
 #[derive(Debug, Deserialize)]

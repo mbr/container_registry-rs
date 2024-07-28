@@ -36,30 +36,6 @@ async fn main() -> anyhow::Result<()> {
     let rockslide_pw = cfg.rockslide.master_key.as_secret_string();
     let auth_provider = Arc::new(cfg.rockslide.master_key);
 
-    let local_ip: IpAddr = if podman_is_remote() {
-        debug!("podman instance is remote, trying to guess our external IP address");
-        let local_hostname = gethostname();
-        let dummy_addr = (
-            local_hostname
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("local hostname is not valid UTF8"))?,
-            12345,
-        )
-            .to_socket_addrs()
-            .ok()
-            .and_then(|addrs| addrs.into_iter().find(SocketAddr::is_ipv4))
-            .ok_or_else(|| anyhow::anyhow!("failed to resolve local hostname to ipv4"))?;
-        dummy_addr.ip()
-    } else {
-        debug!("podman is running locally, using localhost IP");
-        [127, 0, 0, 1].into()
-    };
-
-    // The address under which our application is reachable, will be passed to podman.
-    let local_addr = SocketAddr::from((local_ip, cfg.reverse_proxy.http_bind.port()));
-
-    info!(%local_addr, "guessed local registry (i.e. our) address");
-
     let registry = ContainerRegistry::new(&cfg.registry.storage_path, (), auth_provider)?;
 
     let app = Router::new()
@@ -67,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(1024 * 1024)) // See #43.
         .layer(TraceLayer::new_for_http());
 
-    let listener = tokio::net::TcpListener::bind(cfg.reverse_proxy.http_bind)
+    let listener = tokio::net::TcpListener::bind(("localhost", 0))
         .await
         .context("failed to bind listener")?;
     axum::serve(listener, app)
