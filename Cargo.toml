@@ -1,5 +1,9 @@
 [package]
 name = "container-registry"
+description = "A minimal implementation of an OCI container registry, usable as crate or binary"
+documentation = "https://docs.rs/container-registry"
+homepage = "https://github.com/mbr/container_registry-rs"
+repository = "https://github.com/mbr/container_registry-rs"
 authors = [ "Marc Brinkmann <git@marcbrinkmann.de>" ]
 version = "0.1.0"
 edition = "2021"
