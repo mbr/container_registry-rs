@@ -1,3 +1,13 @@
+//! Authentication backends.
+//!
+//! The `container-registry` supports pluggable authentication, as anything that implements the
+//! [`AuthProvider`] trait can be used as an authentication (and authorization) backend. Included
+//! are implementations for the following types:
+//!
+//! * `bool`: A simple always deny (`false`) / always allow (`true`) backend, mainly used in tests
+//!           and example code.
+//! * `HashMap<String, String>`: A mapping of usernames to (unencrypted) passwords.
+
 use std::{collections::HashMap, str, sync::Arc};
 
 use axum::{
@@ -17,9 +27,12 @@ use super::{
     ContainerRegistry,
 };
 
+/// A set of credentials supplied that has not been verified.
 #[derive(Debug)]
 pub struct UnverifiedCredentials {
+    /// The given username.
     pub username: String,
+    /// The provided password.
     pub password: Secret<String>,
 }
 
@@ -48,6 +61,9 @@ impl<S> FromRequestParts<S> for UnverifiedCredentials {
     }
 }
 
+/// A set of credentials that has been validated.
+///
+/// Newtype used to avoid accidentally granting access from unverified credentials.
 #[derive(Debug)]
 pub(crate) struct ValidUser(UnverifiedCredentials);
 
@@ -77,12 +93,20 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
     }
 }
 
+/// An authentication and authorization provider.
+///
+/// At the moment, `container-registry` gives full access to any valid user.
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
-    /// Determine whether the supplied credentials are valid.
+    /// Determines whether the supplied credentials are valid.
+    ///
+    /// Must return `true` if and only if the given unverified credentials are valid.
     async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool;
 
-    /// Check if the given user has access to the given repo.
+    /// Checks if the given user has access to the given repo.
+    ///
+    /// Must return `true` if and only if the given `username`` is allowed to access the
+    /// `namespace` and `image`.
     async fn has_access_to(&self, username: &str, namespace: &str, image: &str) -> bool;
 }
 
