@@ -5,7 +5,11 @@
 //! To use this crate as a library, use the [`ContainerRegistry`] type. Here is a minimal example:
 //!
 //! ```
-//! let registry = container_registry::ContainerRegistry::new("./storage", (), std::sync::Arc::new(true));
+//! let registry = container_registry::ContainerRegistry::new(
+//!     "./storage",
+//!     Box::new(()),
+//!     std::sync::Arc::new(true)
+//! );
 //! ```
 
 pub mod auth;
@@ -156,16 +160,19 @@ impl ContainerRegistry {
     ///
     // Note: The current implementation defaults to a filesystem based storage backend. It is
     //       conceivable to implement other backends, but currently neither supported nor tested.
-    pub fn new<P: AsRef<std::path::Path>, T: RegistryHooks + 'static>(
+    pub fn new<P>(
         storage_path: P,
-        hooks: T,
+        hooks: Box<dyn RegistryHooks>,
         auth_provider: Arc<dyn AuthProvider>,
-    ) -> Result<Arc<Self>, FilesystemStorageError> {
+    ) -> Result<Arc<Self>, FilesystemStorageError>
+    where
+        P: AsRef<std::path::Path>,
+    {
         Ok(Arc::new(ContainerRegistry {
             realm: "ContainerRegistry".to_string(),
-            auth_provider: auth_provider,
+            auth_provider,
             storage: Box::new(FilesystemStorage::new(storage_path)?),
-            hooks: Box::new(hooks),
+            hooks,
         }))
     }
 
@@ -627,7 +634,7 @@ mod tests {
         let password = "random-test-password".to_owned();
         let master_key = Arc::new(MasterKey::new_key(password.clone()));
 
-        let registry = ContainerRegistry::new(tmp.as_ref(), (), master_key)
+        let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), master_key)
             .expect("should not fail to create app");
         let router = registry
             .clone()

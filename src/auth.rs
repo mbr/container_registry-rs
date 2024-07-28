@@ -18,7 +18,7 @@ use super::{
 };
 
 #[derive(Debug)]
-pub(crate) struct UnverifiedCredentials {
+pub struct UnverifiedCredentials {
     pub username: String,
     pub password: Secret<String>,
 }
@@ -123,6 +123,22 @@ impl AuthProvider for HashMap<String, Secret<String>> {
 
 #[async_trait]
 impl<T> AuthProvider for Box<T>
+where
+    T: AuthProvider,
+{
+    #[inline(always)]
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
+        <T as AuthProvider>::check_credentials(self, creds).await
+    }
+
+    #[inline(always)]
+    async fn has_access_to(&self, username: &str, namespace: &str, image: &str) -> bool {
+        <T as AuthProvider>::has_access_to(self, username, namespace, image).await
+    }
+}
+
+#[async_trait]
+impl<T> AuthProvider for Arc<T>
 where
     T: AuthProvider,
 {
