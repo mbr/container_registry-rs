@@ -13,6 +13,8 @@ mod www_authenticate;
 
 use std::{
     fmt::{self, Display},
+    io,
+    num::ParseIntError,
     str::FromStr,
     sync::Arc,
 };
@@ -52,35 +54,34 @@ pub(crate) use {
 ///
 /// Errors produced by the registry have a "safe" [`IntoResponse`] implementation, thus can be
 /// returned straight to the user without security concerns.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum RegistryError {
     /// A requested item (eg. manifest, blob, etc.) was not found.
+    #[error("missing item")]
     NotFound,
-    /// An internal system produced an error.
-    ///
-    /// These kinds of errors are typically not user visible.
-    // TODO: Remove `anyhow` (but still hide errors).
-    Internal(anyhow::Error),
-}
-
-impl Display for RegistryError {
-    #[inline(always)]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RegistryError::NotFound => f.write_str("missing item"),
-            RegistryError::Internal(err) => Display::fmt(err, f),
-        }
-    }
-}
-
-impl<E> From<E> for RegistryError
-where
-    E: Into<anyhow::Error>,
-{
-    #[inline(always)]
-    fn from(err: E) -> Self {
-        RegistryError::Internal(err.into())
-    }
+    /// Error in storage backend.
+    #[error(transparent)]
+    // TODO: Remove `from` impl.
+    Storage(#[from] storage::Error),
+    /// Error parsing image manifest.
+    #[error("could not parse manifest")]
+    ParseManifest(serde_json::Error),
+    /// A requested/required feature was not supported by this registry.
+    #[error("feature not supported: {0}")]
+    NotSupported(&'static str),
+    /// Invalid integer supplied for content length.
+    #[error("error parsing content length")]
+    ContentLengthMalformed(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Incoming stream read error.
+    #[error("failed to read incoming data stream")]
+    IncomingReadFailed(#[source] axum::Error),
+    /// Failed to write local data to storage.
+    #[error("local write failed")]
+    LocalWriteFailed(#[source] io::Error),
+    /// Error building HTTP response.
+    #[error("axum http error")]
+    // Note: These should never occur.
+    AxumHttp(#[from] axum::http::Error),
 }
 
 impl IntoResponse for RegistryError {
@@ -93,9 +94,38 @@ impl IntoResponse for RegistryError {
                 OciErrors::single(OciError::new(types::ErrorCode::BlobUnknown)),
             )
                 .into_response(),
-            RegistryError::Internal(err) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
-            }
+            RegistryError::Storage(err) => err.into_response(),
+            RegistryError::ParseManifest(err) => (
+                StatusCode::BAD_REQUEST,
+                format!("could not parse manifest: {}", err),
+            )
+                .into_response(),
+            RegistryError::NotSupported(feature) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("feature not supported: {}", feature),
+            )
+                .into_response(),
+            RegistryError::ContentLengthMalformed(err) => (
+                StatusCode::BAD_REQUEST,
+                format!("invalid content length value: {}", err),
+            )
+                .into_response(),
+            RegistryError::IncomingReadFailed(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read input stream",
+            )
+                .into_response(),
+            RegistryError::LocalWriteFailed(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not write image locally",
+            )
+                .into_response(),
+            RegistryError::AxumHttp(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                // Fixed message, we don't want to leak anything. This should never happen anyway.
+                "error building axum HTTP response",
+            )
+                .into_response(),
         }
     }
 }
@@ -405,7 +435,9 @@ async fn upload_add_chunk(
 ) -> Result<UploadState, RegistryError> {
     // Check if we have a range - if so, its an unsupported feature, namely monolith uploads.
     if request.headers().contains_key(RANGE) {
-        return Err(anyhow::anyhow!("unsupported feature: chunked uploads").into());
+        return Err(RegistryError::NotSupported(
+            "unsupported feature: chunked uploads",
+        ));
     }
 
     let mut writer = registry.storage.get_upload_writer(0, upload).await?;
@@ -415,12 +447,18 @@ async fn upload_add_chunk(
 
     let mut completed: u64 = 0;
     while let Some(result) = body.next().await {
-        let chunk = result?;
+        let chunk = result.map_err(RegistryError::IncomingReadFailed)?;
         completed += chunk.len() as u64;
-        writer.write_all(chunk.as_ref()).await?;
+        writer
+            .write_all(chunk.as_ref())
+            .await
+            .map_err(RegistryError::LocalWriteFailed)?;
     }
 
-    writer.flush().await?;
+    writer
+        .flush()
+        .await
+        .map_err(RegistryError::LocalWriteFailed)?;
 
     Ok(UploadState {
         location,
@@ -449,9 +487,15 @@ async fn upload_finalize(
     // We do not support the final chunk in the `PUT` call, so ensure that's not the case.
     match request.headers().get(CONTENT_LENGTH) {
         Some(value) => {
-            let num_bytes: u64 = value.to_str()?.parse()?;
+            let num_bytes: u64 = value
+                .to_str()
+                .map_err(|err| RegistryError::ContentLengthMalformed(Box::new(err)))?
+                .parse()
+                .map_err(|err| RegistryError::ContentLengthMalformed(Box::new(err)))?;
             if num_bytes != 0 {
-                return Err(anyhow::anyhow!("missing content length not implemented").into());
+                return Err(RegistryError::NotSupported(
+                    "missing content length not implemented",
+                ));
             }
 
             // 0 is the only acceptable value here.
@@ -517,7 +561,8 @@ async fn manifest_get(
         .await?
         .ok_or(RegistryError::NotFound)?;
 
-    let manifest: ImageManifest = serde_json::from_slice(&manifest_json)?;
+    let manifest: ImageManifest =
+        serde_json::from_slice(&manifest_json).map_err(RegistryError::ParseManifest)?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
