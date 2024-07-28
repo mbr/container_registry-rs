@@ -1,3 +1,4 @@
+# TODO: This file is leftover from rockslide and needs to be updated.
 let
   rust-overlay = (import (builtins.fetchTarball
     "https://github.com/oxalica/rust-overlay/archive/7c94410d52d4e8bd72803fc1fe6c51fe179edaf5.tar.gz"));

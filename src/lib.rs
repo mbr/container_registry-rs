@@ -1,18 +1,42 @@
-//! Open Container / "Docker" registry
-//!
-//! ## Specs
-//!
-//! * Registry: https://github.com/opencontainers/distribution-spec/blob/v1.0.1/spec.md
-//! * Manifest: https://github.com/opencontainers/image-spec/blob/main/manifest.md
+#![doc = include_str!("../README.md")]
 
-mod auth;
-pub(crate) mod hooks;
-pub(crate) mod storage;
+//! ## Getting started
+//!
+//! To use this crate as a library, use the [`ContainerRegistry`] type. Here is a minimal example,
+//! supplying a unit value (`()`) to indicate it does not use any hooks, and `true` as the auth
+//! provider, which will accept any username and password combination as valid:
+//!
+//! ```
+//!# use axum::{extract::DefaultBodyLimit, Router};
+//! // The registry requires an existing (empty) directory, which it will initialize.
+//! let storage = tempdir::TempDir::new("container_registry_test")
+//!     .expect("could not create storage dir");
+//!
+//! // Instantiate the registry.
+//! let registry = container_registry::ContainerRegistry::new(
+//!     storage.path(),
+//!     Box::new(()),
+//!     std::sync::Arc::new(true)
+//! ).expect("failed to instantiate registry");
+//!
+//! // Create an axum app router and mount our new registry on it.
+//! let app = Router::new()
+//!     .merge(registry.make_router())
+//!     // 1 GB body limit.
+//!     .layer(DefaultBodyLimit::max(1024 * 1024 * 1024));
+//! ```
+//!
+//! Afterwards, `app` can be launched via [`axum::serve()`], see its documentation for details.
+
+pub mod auth;
+pub mod hooks;
+pub mod storage;
 mod types;
 mod www_authenticate;
 
 use std::{
     fmt::{self, Display},
+    io,
     str::FromStr,
     sync::Arc,
 };
@@ -45,74 +69,133 @@ use uuid::Uuid;
 pub(crate) use {
     auth::{AuthProvider, UnverifiedCredentials},
     hooks::RegistryHooks,
-    storage::{FilesystemStorageError, ManifestReference, Reference},
+    storage::{FilesystemStorageError, ManifestReference},
 };
 
-#[derive(Debug)]
-enum AppError {
+/// A container registry error.
+///
+/// Errors produced by the registry have a "safe" [`IntoResponse`] implementation, thus can be
+/// returned straight to the user without security concerns.
+#[derive(Debug, Error)]
+pub enum RegistryError {
+    /// A requested item (eg. manifest, blob, etc.) was not found.
+    #[error("missing item")]
     NotFound,
-    Internal(anyhow::Error),
+    /// Error in storage backend.
+    #[error(transparent)]
+    // TODO: Remove `from` impl.
+    Storage(#[from] storage::Error),
+    /// Error parsing image manifest.
+    #[error("could not parse manifest")]
+    ParseManifest(serde_json::Error),
+    /// A requested/required feature was not supported by this registry.
+    #[error("feature not supported: {0}")]
+    NotSupported(&'static str),
+    /// Invalid integer supplied for content length.
+    #[error("error parsing content length")]
+    ContentLengthMalformed(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Incoming stream read error.
+    #[error("failed to read incoming data stream")]
+    IncomingReadFailed(#[source] axum::Error),
+    /// Failed to write local data to storage.
+    #[error("local write failed")]
+    LocalWriteFailed(#[source] io::Error),
+    /// Error building HTTP response.
+    #[error("axum http error")]
+    // Note: These should never occur.
+    AxumHttp(#[from] axum::http::Error),
 }
 
-impl Display for AppError {
-    #[inline(always)]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AppError::NotFound => f.write_str("missing item"),
-            AppError::Internal(err) => Display::fmt(err, f),
-        }
-    }
-}
-
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    #[inline(always)]
-    fn from(err: E) -> Self {
-        AppError::Internal(err.into())
-    }
-}
-
-impl IntoResponse for AppError {
+impl IntoResponse for RegistryError {
     #[inline(always)]
     fn into_response(self) -> Response {
         match self {
             // TODO: Need better OciError handling here. Not everything is blob unknown.
-            AppError::NotFound => (
+            RegistryError::NotFound => (
                 StatusCode::NOT_FOUND,
                 OciErrors::single(OciError::new(types::ErrorCode::BlobUnknown)),
             )
                 .into_response(),
-            AppError::Internal(err) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
-            }
+            RegistryError::Storage(err) => err.into_response(),
+            RegistryError::ParseManifest(err) => (
+                StatusCode::BAD_REQUEST,
+                format!("could not parse manifest: {}", err),
+            )
+                .into_response(),
+            RegistryError::NotSupported(feature) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("feature not supported: {}", feature),
+            )
+                .into_response(),
+            RegistryError::ContentLengthMalformed(err) => (
+                StatusCode::BAD_REQUEST,
+                format!("invalid content length value: {}", err),
+            )
+                .into_response(),
+            RegistryError::IncomingReadFailed(_err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read input stream",
+            )
+                .into_response(),
+            RegistryError::LocalWriteFailed(_err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not write image locally",
+            )
+                .into_response(),
+            RegistryError::AxumHttp(_err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                // Fixed message, we don't want to leak anything. This should never happen anyway.
+                "error building axum HTTP response",
+            )
+                .into_response(),
         }
     }
 }
 
-pub(crate) struct ContainerRegistry {
+/// A container registry storing OCI containers.
+pub struct ContainerRegistry {
+    /// The realm name for the registry.
+    ///
+    /// Solely used for HTTP auth.
     realm: String,
+    /// An implementation for authentication.
     auth_provider: Arc<dyn AuthProvider>,
+    /// A storage backend for the registry.
     storage: Box<dyn RegistryStorage>,
+    /// A hook consumer for the registry.
     hooks: Box<dyn RegistryHooks>,
 }
 
 impl ContainerRegistry {
-    pub(crate) fn new<P: AsRef<std::path::Path>, T: RegistryHooks + 'static>(
+    /// Creates a new instance of the container registry.
+    ///
+    /// The instance uses the filesystem as the backend to store manifests and blobs, and requires
+    /// an [`AuthProvider`] and [`RegistryHooks`] to provided. Note that it is possible to supply
+    /// `()` for both `hooks` and `auth_provider`.
+    ///
+    /// The current implementation defaults to a filesystem based storage backend at
+    /// `storage_path`. It is conceivable to implement other backends, but currently not supported.
+    pub fn new<P>(
         storage_path: P,
-        orchestrator: T,
+        hooks: Box<dyn RegistryHooks>,
         auth_provider: Arc<dyn AuthProvider>,
-    ) -> Result<Arc<Self>, FilesystemStorageError> {
+    ) -> Result<Arc<Self>, FilesystemStorageError>
+    where
+        P: AsRef<std::path::Path>,
+    {
         Ok(Arc::new(ContainerRegistry {
             realm: "ContainerRegistry".to_string(),
-            auth_provider: auth_provider,
+            auth_provider,
             storage: Box::new(FilesystemStorage::new(storage_path)?),
-            hooks: Box::new(orchestrator),
+            hooks,
         }))
     }
 
-    pub(crate) fn make_router(self: Arc<ContainerRegistry>) -> Router {
+    /// Builds an [`axum::routing::Router`] for this registry.
+    ///
+    /// Produces the core entry point for the registry; create and mount the router into an `axum`
+    /// application to use it.
+    pub fn make_router(self: Arc<ContainerRegistry>) -> Router {
         Router::new()
             .route("/v2/", get(index_v2))
             .route("/v2/:repository/:image/blobs/:digest", head(blob_check))
@@ -138,6 +221,10 @@ impl ContainerRegistry {
     }
 }
 
+/// Registry index
+///
+/// Returns an empty HTTP OK response if provided credentials are okay, otherwise returns
+/// UNAUTHORIZED.
 async fn index_v2(
     State(registry): State<Arc<ContainerRegistry>>,
     credentials: Option<UnverifiedCredentials>,
@@ -162,11 +249,12 @@ async fn index_v2(
         .unwrap()
 }
 
+/// Returns metadata of a specific image blob.
 async fn blob_check(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
     _auth: ValidUser,
-) -> Result<Response, AppError> {
+) -> Result<Response, RegistryError> {
     if let Some(metadata) = registry.storage.get_blob_metadata(image.digest).await? {
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -183,18 +271,19 @@ async fn blob_check(
     }
 }
 
+/// Returns a specific image blob.
 async fn blob_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
     _auth: ValidUser,
-) -> Result<Response, AppError> {
+) -> Result<Response, RegistryError> {
     // TODO: Get size for `Content-length` header.
 
     let reader = registry
         .storage
         .get_blob_reader(image.digest)
         .await?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(RegistryError::NotFound)?;
 
     let stream = ReaderStream::new(reader);
     let body = Body::from_stream(stream);
@@ -205,11 +294,12 @@ async fn blob_get(
         .unwrap())
 }
 
+/// Initiates a new blob upload.
 async fn upload_new(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
     _auth: ValidUser,
-) -> Result<UploadState, AppError> {
+) -> Result<UploadState, RegistryError> {
     // Initiate a new upload
     let upload = registry.storage.begin_new_upload().await?;
 
@@ -220,16 +310,26 @@ async fn upload_new(
     })
 }
 
+/// Returns the URI for a specific part of an upload.
 fn mk_upload_location(location: &ImageLocation, uuid: Uuid) -> String {
     let repository = &location.repository();
     let image = &location.image();
     format!("/v2/{repository}/{image}/uploads/{uuid}")
 }
 
+/// Image upload state.
+///
+/// Represents the state of a partial upload of a specific blob, which may be uploaded in chunks.
+///
+/// The OCI protocol requires the upload state communicated back through HTTP headers, this type
+/// represents said information.
 #[derive(Debug)]
 struct UploadState {
+    /// The location of the image.
     location: ImageLocation,
+    /// The amount of bytes completed.
     completed: Option<u64>,
+    /// The UUID for this specific upload part.
     upload: Uuid,
 }
 
@@ -255,14 +355,20 @@ impl IntoResponse for UploadState {
     }
 }
 
+/// An upload ID.
 #[derive(Copy, Clone, Debug, Deserialize)]
 struct UploadId {
+    /// The UUID representing this upload.
     upload: Uuid,
 }
 
 #[derive(Debug)]
 
+/// An image hash.
+///
+/// Currently only SHA256 hashes are supported.
 struct ImageDigest {
+    /// The actual image digest.
     digest: storage::Digest,
 }
 
@@ -288,18 +394,23 @@ impl<'de> Deserialize<'de> for ImageDigest {
 }
 
 impl ImageDigest {
+    /// Creats a new image hash from an existing digest.
     #[inline(always)]
     pub const fn new(digest: storage::Digest) -> Self {
         Self { digest }
     }
 }
 
+/// Error parsing a specific image digest.
 #[derive(Debug, Error)]
 enum ImageDigestParseError {
+    /// The given digest was of the wrong length.
     #[error("wrong length")]
     WrongLength,
+    /// The given digest had an invalid or unsupported prefix.
     #[error("wrong prefix")]
     WrongPrefix,
+    /// The hex encoding was not valid.
     #[error("hex decoding error")]
     HexDecodeError,
 }
@@ -338,16 +449,19 @@ impl Display for ImageDigest {
     }
 }
 
+/// Adds a chunk to an existing upload.
 async fn upload_add_chunk(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
     Path(UploadId { upload }): Path<UploadId>,
     _auth: ValidUser,
     request: axum::extract::Request,
-) -> Result<UploadState, AppError> {
-    // Check if we have a range - if so, its an unsupported feature, namely monolit uploads.
+) -> Result<UploadState, RegistryError> {
+    // Check if we have a range - if so, its an unsupported feature, namely monolith uploads.
     if request.headers().contains_key(RANGE) {
-        return Err(anyhow::anyhow!("unsupported feature: chunked uploads").into());
+        return Err(RegistryError::NotSupported(
+            "unsupported feature: chunked uploads",
+        ));
     }
 
     let mut writer = registry.storage.get_upload_writer(0, upload).await?;
@@ -357,12 +471,18 @@ async fn upload_add_chunk(
 
     let mut completed: u64 = 0;
     while let Some(result) = body.next().await {
-        let chunk = result?;
+        let chunk = result.map_err(RegistryError::IncomingReadFailed)?;
         completed += chunk.len() as u64;
-        writer.write_all(chunk.as_ref()).await?;
+        writer
+            .write_all(chunk.as_ref())
+            .await
+            .map_err(RegistryError::LocalWriteFailed)?;
     }
 
-    writer.flush().await?;
+    writer
+        .flush()
+        .await
+        .map_err(RegistryError::LocalWriteFailed)?;
 
     Ok(UploadState {
         location,
@@ -371,24 +491,35 @@ async fn upload_add_chunk(
     })
 }
 
+/// An image digest on a query string.
+///
+/// Newtype to allow [`axum::extract::Query`] to parse it.
 #[derive(Debug, Deserialize)]
 struct DigestQuery {
+    /// The image in question.
     digest: ImageDigest,
 }
 
+/// Finishes an upload.
 async fn upload_finalize(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, upload)): Path<(String, String, Uuid)>,
     Query(DigestQuery { digest }): Query<DigestQuery>,
     _auth: ValidUser,
     request: axum::extract::Request,
-) -> Result<Response<Body>, AppError> {
+) -> Result<Response<Body>, RegistryError> {
     // We do not support the final chunk in the `PUT` call, so ensure that's not the case.
     match request.headers().get(CONTENT_LENGTH) {
         Some(value) => {
-            let num_bytes: u64 = value.to_str()?.parse()?;
+            let num_bytes: u64 = value
+                .to_str()
+                .map_err(|err| RegistryError::ContentLengthMalformed(Box::new(err)))?
+                .parse()
+                .map_err(|err| RegistryError::ContentLengthMalformed(Box::new(err)))?;
             if num_bytes != 0 {
-                return Err(anyhow::anyhow!("missing content length not implemented").into());
+                return Err(RegistryError::NotSupported(
+                    "missing content length not implemented",
+                ));
             }
 
             // 0 is the only acceptable value here.
@@ -410,12 +541,13 @@ async fn upload_finalize(
         .body(Body::empty())?)
 }
 
+/// Uploads a manifest.
 async fn manifest_put(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
     _auth: ValidUser,
     image_manifest_json: String,
-) -> Result<Response<Body>, AppError> {
+) -> Result<Response<Body>, RegistryError> {
     let digest = registry
         .storage
         .put_manifest(&manifest_reference, image_manifest_json.as_bytes())
@@ -441,18 +573,20 @@ async fn manifest_put(
         .unwrap())
 }
 
+/// Retrieves a manifest.
 async fn manifest_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
     _auth: ValidUser,
-) -> Result<Response<Body>, AppError> {
+) -> Result<Response<Body>, RegistryError> {
     let manifest_json = registry
         .storage
         .get_manifest(&manifest_reference)
         .await?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(RegistryError::NotFound)?;
 
-    let manifest: ImageManifest = serde_json::from_slice(&manifest_json)?;
+    let manifest: ImageManifest =
+        serde_json::from_slice(&manifest_json).map_err(RegistryError::ParseManifest)?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -476,17 +610,15 @@ mod tests {
     };
     use base64::Engine;
     use http_body_util::BodyExt;
+    use sec::Secret;
     use tempdir::TempDir;
     use tokio::io::AsyncWriteExt;
     use tower::{util::ServiceExt, Service};
     use tower_http::trace::TraceLayer;
 
     use crate::{
-        config::MasterKey,
-        registry::{
-            storage::{ImageLocation, ManifestReference, Reference},
-            ImageDigest,
-        },
+        storage::{ImageLocation, ManifestReference, Reference},
+        ImageDigest,
     };
 
     use super::{storage::Digest, ContainerRegistry};
@@ -500,7 +632,7 @@ mod tests {
     impl Context {
         fn basic_auth(&self) -> String {
             let encoded = base64::prelude::BASE64_STANDARD
-                .encode(&format!("user:{}", self.password).as_bytes());
+                .encode(format!("user:{}", self.password).as_bytes());
             format!("Basic {}", encoded)
         }
 
@@ -515,9 +647,9 @@ mod tests {
         let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
 
         let password = "random-test-password".to_owned();
-        let master_key = Arc::new(MasterKey::new_key(password.clone()));
+        let master_key = Arc::new(Secret::new(password.clone()));
 
-        let registry = ContainerRegistry::new(tmp.as_ref(), (), master_key)
+        let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), master_key)
             .expect("should not fail to create app");
         let router = registry
             .clone()

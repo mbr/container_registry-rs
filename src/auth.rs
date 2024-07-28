@@ -1,3 +1,17 @@
+//! Authentication backends.
+//!
+//! The `container-registry` supports pluggable authentication, as anything that implements the
+//! [`AuthProvider`] trait can be used as an authentication (and authorization) backend. Included
+//! are implementations for the following types:
+//!
+//! * `bool`: A simple always deny (`false`) / always allow (`true`) backend, mainly used in tests
+//!           and example code.
+//! * `HashMap<String, Secret<String>>`: A mapping of usernames to (unencrypted) passwords.
+//! * `Secret<String>`: Master password, ignores all usernames and just compares the password.
+//!
+//! To provide some safety against accidentally leaking passwords via stray `Debug` implementations,
+//! this crate uses the [`sec`]'s crate [`Secret`] type.
+
 use std::{collections::HashMap, str, sync::Arc};
 
 use axum::{
@@ -16,9 +30,12 @@ use super::{
     ContainerRegistry,
 };
 
+/// A set of credentials supplied that has not been verified.
 #[derive(Debug)]
-pub(crate) struct UnverifiedCredentials {
+pub struct UnverifiedCredentials {
+    /// The given username.
     pub username: String,
+    /// The provided password.
     pub password: Secret<String>,
 }
 
@@ -47,13 +64,17 @@ impl<S> FromRequestParts<S> for UnverifiedCredentials {
     }
 }
 
+/// A set of credentials that has been validated.
+///
+/// Newtype used to avoid accidentally granting access from unverified credentials.
 #[derive(Debug)]
-pub(crate) struct ValidUser(UnverifiedCredentials);
+pub struct ValidUser(String);
 
 impl ValidUser {
-    #[allow(dead_code)] // TODO
-    pub(crate) fn username(&self) -> &str {
-        &self.0.username
+    /// Returns the valid user's username.
+    #[inline(always)]
+    pub fn username(&self) -> &str {
+        &self.0
     }
 }
 
@@ -71,27 +92,25 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
         if !state.auth_provider.check_credentials(&unverified).await {
             Err(StatusCode::UNAUTHORIZED)
         } else {
-            Ok(Self(unverified))
+            Ok(Self(unverified.username))
         }
     }
 }
 
+/// An authentication and authorization provider.
+///
+/// At the moment, `container-registry` gives full access to any valid user.
 #[async_trait]
-pub(crate) trait AuthProvider: Send + Sync {
-    /// Determine whether the supplied credentials are valid.
+pub trait AuthProvider: Send + Sync {
+    /// Determines whether the supplied credentials are valid.
+    ///
+    /// Must return `true` if and only if the given unverified credentials are valid.
     async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool;
-
-    /// Check if the given user has access to the given repo.
-    async fn has_access_to(&self, username: &str, namespace: &str, image: &str) -> bool;
 }
 
 #[async_trait]
 impl AuthProvider for bool {
     async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> bool {
-        *self
-    }
-
-    async fn has_access_to(&self, _username: &str, _namespace: &str, _image: &str) -> bool {
         *self
     }
 }
@@ -106,17 +125,13 @@ impl AuthProvider for HashMap<String, Secret<String>> {
         }: &UnverifiedCredentials,
     ) -> bool {
         if let Some(correct_password) = self.get(unverified_username) {
-            // TODO: Use constant-time compare. Maybe add to `sec`?
-            if correct_password == unverified_password {
-                return true;
-            }
+            return constant_time_eq::constant_time_eq(
+                correct_password.reveal().as_bytes(),
+                unverified_password.reveal().as_bytes(),
+            );
         }
 
         false
-    }
-
-    async fn has_access_to(&self, _username: &str, _namespace: &str, _image: &str) -> bool {
-        true
     }
 }
 
@@ -129,9 +144,26 @@ where
     async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
+}
 
+#[async_trait]
+impl<T> AuthProvider for Arc<T>
+where
+    T: AuthProvider,
+{
     #[inline(always)]
-    async fn has_access_to(&self, username: &str, namespace: &str, image: &str) -> bool {
-        <T as AuthProvider>::has_access_to(self, username, namespace, image).await
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
+        <T as AuthProvider>::check_credentials(self, creds).await
+    }
+}
+
+#[async_trait]
+impl AuthProvider for Secret<String> {
+    #[inline(always)]
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
+        constant_time_eq::constant_time_eq(
+            creds.password.reveal().as_bytes(),
+            self.reveal().as_bytes(),
+        )
     }
 }
