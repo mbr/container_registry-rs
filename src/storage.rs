@@ -17,7 +17,7 @@ use super::{types::ImageManifest, ImageDigest};
 
 const SHA256_LEN: usize = 32;
 
-const BUFFER_SIZE: usize = 1024 * 1024 * 1024; // 1 MiB
+const BUFFER_SIZE: usize = 1024 * 1024; // 1 MiB
 
 // TODO: Maybe use `ImageDigest` directly?
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Serialize)]
