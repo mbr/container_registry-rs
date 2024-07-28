@@ -6,6 +6,7 @@
 
 * Code factored out from <https://github.com/mbr/rockslide>, version 0.2.0.
 * Added capability to use code as a library.
+* A small binary to run a registry from the command line is included as well.
 
 ### Fixed
 
