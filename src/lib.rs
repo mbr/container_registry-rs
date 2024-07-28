@@ -1,15 +1,22 @@
 #![doc = include_str!("../README.md")]
 
-mod auth;
-pub(crate) mod hooks;
-pub(crate) mod storage;
+//! ## Getting started
+//!
+//! To use this crate as a library, use the [`ContainerRegistry`] type. Here is a minimal example:
+//!
+//! ```
+//! let registry = container_registry::ContainerRegistry::new("./storage", (), std::sync::Arc::new(true));
+//! ```
+
+pub mod auth;
+pub mod hooks;
+pub mod storage;
 mod types;
 mod www_authenticate;
 
 use std::{
     fmt::{self, Display},
     io,
-    num::ParseIntError,
     str::FromStr,
     sync::Arc,
 };
@@ -50,7 +57,7 @@ pub(crate) use {
 /// Errors produced by the registry have a "safe" [`IntoResponse`] implementation, thus can be
 /// returned straight to the user without security concerns.
 #[derive(Debug, Error)]
-enum RegistryError {
+pub enum RegistryError {
     /// A requested item (eg. manifest, blob, etc.) was not found.
     #[error("missing item")]
     NotFound,
@@ -126,7 +133,7 @@ impl IntoResponse for RegistryError {
 }
 
 /// A container registry storing OCI containers.
-pub(crate) struct ContainerRegistry {
+pub struct ContainerRegistry {
     /// The realm name for the registry.
     ///
     /// Solely used for HTTP auth.
@@ -149,7 +156,7 @@ impl ContainerRegistry {
     ///
     // Note: The current implementation defaults to a filesystem based storage backend. It is
     //       conceivable to implement other backends, but currently neither supported nor tested.
-    pub(crate) fn new<P: AsRef<std::path::Path>, T: RegistryHooks + 'static>(
+    pub fn new<P: AsRef<std::path::Path>, T: RegistryHooks + 'static>(
         storage_path: P,
         hooks: T,
         auth_provider: Arc<dyn AuthProvider>,

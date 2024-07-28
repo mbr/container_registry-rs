@@ -78,7 +78,7 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
 }
 
 #[async_trait]
-pub(crate) trait AuthProvider: Send + Sync {
+pub trait AuthProvider: Send + Sync {
     /// Determine whether the supplied credentials are valid.
     async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool;
 

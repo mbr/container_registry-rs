@@ -62,7 +62,7 @@ impl Display for ImageLocation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct ManifestReference {
+pub struct ManifestReference {
     #[serde(flatten)]
     location: ImageLocation,
     reference: Reference,
@@ -259,7 +259,7 @@ pub(crate) trait RegistryStorage: Send + Sync {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum FilesystemStorageError {
+pub enum FilesystemStorageError {
     #[error("could not canonicalize root {}", path.display())]
     CouldNotCanonicalizeRoot {
         path: PathBuf,
