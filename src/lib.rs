@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-//! ## Getting started
+//! ## Use a library
 //!
 //! To use this crate as a library, use the [`ContainerRegistry`] type. Here is a minimal example,
 //! supplying a unit value (`()`) to indicate it does not use any hooks, and `true` as the auth

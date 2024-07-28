@@ -20,3 +20,11 @@ An image registry cannot exist outside a web framework, unless it were to ship o
 ## Production readiness
 
 The crate has not been thoroughly battle tested in contested production environments, or seen a deep review, so relying on it for mission critical deployments is probably a bad idea. At this point, it should make a reasonable drop-in replacement for other registries that are not publically accessible and can likely fulfill its role in system level tests.
+
+## Use as a binary
+
+`container-registry` includes a bare-bones installable binary that exposes most of its features from the command line. It is automatically built if the `bin` features is enabled:
+
+```
+cargo install container-registry --features bin
+```
