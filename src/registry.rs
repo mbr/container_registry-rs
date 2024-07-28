@@ -48,57 +48,82 @@ pub(crate) use {
     storage::{FilesystemStorageError, ManifestReference, Reference},
 };
 
+/// A container registry error.
+///
+/// Errors produced by the registry have a "safe" [`IntoResponse`] implementation, thus can be
+/// returned straight to the user without security concerns.
 #[derive(Debug)]
-enum AppError {
+enum RegistryError {
+    /// A requested item (eg. manifest, blob, etc.) was not found.
     NotFound,
+    /// An internal system produced an error.
+    ///
+    /// These kinds of errors are typically not user visible.
+    // TODO: Remove `anyhow` (but still hide errors).
     Internal(anyhow::Error),
 }
 
-impl Display for AppError {
+impl Display for RegistryError {
     #[inline(always)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AppError::NotFound => f.write_str("missing item"),
-            AppError::Internal(err) => Display::fmt(err, f),
+            RegistryError::NotFound => f.write_str("missing item"),
+            RegistryError::Internal(err) => Display::fmt(err, f),
         }
     }
 }
 
-impl<E> From<E> for AppError
+impl<E> From<E> for RegistryError
 where
     E: Into<anyhow::Error>,
 {
     #[inline(always)]
     fn from(err: E) -> Self {
-        AppError::Internal(err.into())
+        RegistryError::Internal(err.into())
     }
 }
 
-impl IntoResponse for AppError {
+impl IntoResponse for RegistryError {
     #[inline(always)]
     fn into_response(self) -> Response {
         match self {
             // TODO: Need better OciError handling here. Not everything is blob unknown.
-            AppError::NotFound => (
+            RegistryError::NotFound => (
                 StatusCode::NOT_FOUND,
                 OciErrors::single(OciError::new(types::ErrorCode::BlobUnknown)),
             )
                 .into_response(),
-            AppError::Internal(err) => {
+            RegistryError::Internal(err) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
             }
         }
     }
 }
 
+/// A container registry storing OCI containers.
 pub(crate) struct ContainerRegistry {
+    /// The realm name for the registry.
+    ///
+    /// Solely used for HTTP auth.
     realm: String,
+    /// An implementation for authentication.
     auth_provider: Arc<dyn AuthProvider>,
+    /// A storage backend for the registry.
     storage: Box<dyn RegistryStorage>,
+    /// A hook consumer for the registry.
     hooks: Box<dyn RegistryHooks>,
 }
 
 impl ContainerRegistry {
+    /// Creates a new instance of the container registry.
+    ///
+    /// The instance uses the filesystem as the backend to store manifests and blobs, and requires
+    /// an [`AuthProvider`] and [`RegistryHooks`] to provided.
+    ///
+    /// Note that it is possible to supply `()` for both `hooks` and `auth_provider`.
+    ///
+    // Note: The current implementation defaults to a filesystem based storage backend. It is
+    //       conceivable to implement other backends, but currently neither supported nor tested.
     pub(crate) fn new<P: AsRef<std::path::Path>, T: RegistryHooks + 'static>(
         storage_path: P,
         hooks: T,
@@ -112,6 +137,10 @@ impl ContainerRegistry {
         }))
     }
 
+    /// Builds an [`axum::routing::Router`] for this registry.
+    ///
+    /// Produces the core entry point for the registry; create and mount the router into an `axum`
+    /// application to use it.
     pub(crate) fn make_router(self: Arc<ContainerRegistry>) -> Router {
         Router::new()
             .route("/v2/", get(index_v2))
@@ -138,6 +167,10 @@ impl ContainerRegistry {
     }
 }
 
+/// Registry index
+///
+/// Returns an empty HTTP OK response if provided credentials are okay, otherwise returns
+/// UNAUTHORIZED.
 async fn index_v2(
     State(registry): State<Arc<ContainerRegistry>>,
     credentials: Option<UnverifiedCredentials>,
@@ -162,11 +195,12 @@ async fn index_v2(
         .unwrap()
 }
 
+/// Returns metadata of a specific image blob.
 async fn blob_check(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
     _auth: ValidUser,
-) -> Result<Response, AppError> {
+) -> Result<Response, RegistryError> {
     if let Some(metadata) = registry.storage.get_blob_metadata(image.digest).await? {
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -183,18 +217,19 @@ async fn blob_check(
     }
 }
 
+/// Returns a specific image blob.
 async fn blob_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
     _auth: ValidUser,
-) -> Result<Response, AppError> {
+) -> Result<Response, RegistryError> {
     // TODO: Get size for `Content-length` header.
 
     let reader = registry
         .storage
         .get_blob_reader(image.digest)
         .await?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(RegistryError::NotFound)?;
 
     let stream = ReaderStream::new(reader);
     let body = Body::from_stream(stream);
@@ -205,11 +240,12 @@ async fn blob_get(
         .unwrap())
 }
 
+/// Initiates a new blob upload.
 async fn upload_new(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
     _auth: ValidUser,
-) -> Result<UploadState, AppError> {
+) -> Result<UploadState, RegistryError> {
     // Initiate a new upload
     let upload = registry.storage.begin_new_upload().await?;
 
@@ -220,16 +256,26 @@ async fn upload_new(
     })
 }
 
+/// Returns the URI for a specific part of an upload.
 fn mk_upload_location(location: &ImageLocation, uuid: Uuid) -> String {
     let repository = &location.repository();
     let image = &location.image();
     format!("/v2/{repository}/{image}/uploads/{uuid}")
 }
 
+/// Image upload state.
+///
+/// Represents the state of a partial upload of a specific blob, which may be uploaded in chunks.
+///
+/// The OCI protocol requires the upload state communicated back through HTTP headers, this type
+/// represents said information.
 #[derive(Debug)]
 struct UploadState {
+    /// The location of the image.
     location: ImageLocation,
+    /// The amount of bytes completed.
     completed: Option<u64>,
+    /// The UUID for this specific upload part.
     upload: Uuid,
 }
 
@@ -255,14 +301,20 @@ impl IntoResponse for UploadState {
     }
 }
 
+/// An upload ID.
 #[derive(Copy, Clone, Debug, Deserialize)]
 struct UploadId {
+    /// The UUID representing this upload.
     upload: Uuid,
 }
 
 #[derive(Debug)]
 
+/// An image hash.
+///
+/// Currently only SHA256 hashes are supported.
 struct ImageDigest {
+    /// The actual image digest.
     digest: storage::Digest,
 }
 
@@ -288,18 +340,23 @@ impl<'de> Deserialize<'de> for ImageDigest {
 }
 
 impl ImageDigest {
+    /// Creats a new image hash from an existing digest.
     #[inline(always)]
     pub const fn new(digest: storage::Digest) -> Self {
         Self { digest }
     }
 }
 
+/// Error parsing a specific image digest.
 #[derive(Debug, Error)]
 enum ImageDigestParseError {
+    /// The given digest was of the wrong length.
     #[error("wrong length")]
     WrongLength,
+    /// The given digest had an invalid or unsupported prefix.
     #[error("wrong prefix")]
     WrongPrefix,
+    /// The hex encoding was not valid.
     #[error("hex decoding error")]
     HexDecodeError,
 }
@@ -338,14 +395,15 @@ impl Display for ImageDigest {
     }
 }
 
+/// Adds a chunk to an existing upload.
 async fn upload_add_chunk(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
     Path(UploadId { upload }): Path<UploadId>,
     _auth: ValidUser,
     request: axum::extract::Request,
-) -> Result<UploadState, AppError> {
-    // Check if we have a range - if so, its an unsupported feature, namely monolit uploads.
+) -> Result<UploadState, RegistryError> {
+    // Check if we have a range - if so, its an unsupported feature, namely monolith uploads.
     if request.headers().contains_key(RANGE) {
         return Err(anyhow::anyhow!("unsupported feature: chunked uploads").into());
     }
@@ -371,18 +429,23 @@ async fn upload_add_chunk(
     })
 }
 
+/// An image digest on a query string.
+///
+/// Newtype to allow [`axum::extract::Query`] to parse it.
 #[derive(Debug, Deserialize)]
 struct DigestQuery {
+    /// The image in question.
     digest: ImageDigest,
 }
 
+/// Finishes an upload.
 async fn upload_finalize(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, upload)): Path<(String, String, Uuid)>,
     Query(DigestQuery { digest }): Query<DigestQuery>,
     _auth: ValidUser,
     request: axum::extract::Request,
-) -> Result<Response<Body>, AppError> {
+) -> Result<Response<Body>, RegistryError> {
     // We do not support the final chunk in the `PUT` call, so ensure that's not the case.
     match request.headers().get(CONTENT_LENGTH) {
         Some(value) => {
@@ -410,12 +473,13 @@ async fn upload_finalize(
         .body(Body::empty())?)
 }
 
+/// Uploads a manifest.
 async fn manifest_put(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
     _auth: ValidUser,
     image_manifest_json: String,
-) -> Result<Response<Body>, AppError> {
+) -> Result<Response<Body>, RegistryError> {
     let digest = registry
         .storage
         .put_manifest(&manifest_reference, image_manifest_json.as_bytes())
@@ -441,16 +505,17 @@ async fn manifest_put(
         .unwrap())
 }
 
+/// Retrieves a manifest.
 async fn manifest_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
     _auth: ValidUser,
-) -> Result<Response<Body>, AppError> {
+) -> Result<Response<Body>, RegistryError> {
     let manifest_json = registry
         .storage
         .get_manifest(&manifest_reference)
         .await?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(RegistryError::NotFound)?;
 
     let manifest: ImageManifest = serde_json::from_slice(&manifest_json)?;
 
