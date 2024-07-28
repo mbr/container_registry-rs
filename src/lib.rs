@@ -592,11 +592,9 @@ mod tests {
     use tower_http::trace::TraceLayer;
 
     use crate::{
-        config::MasterKey,
-        registry::{
-            storage::{ImageLocation, ManifestReference, Reference},
-            ImageDigest,
-        },
+        auth::MasterKey,
+        storage::{ImageLocation, ManifestReference, Reference},
+        ImageDigest,
     };
 
     use super::{storage::Digest, ContainerRegistry};

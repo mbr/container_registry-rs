@@ -10,6 +10,7 @@ use axum::{
     },
 };
 use sec::Secret;
+use serde::Deserialize;
 
 use super::{
     www_authenticate::{self},
@@ -133,5 +134,59 @@ where
     #[inline(always)]
     async fn has_access_to(&self, username: &str, namespace: &str, image: &str) -> bool {
         <T as AuthProvider>::has_access_to(self, username, namespace, image).await
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) enum MasterKey {
+    #[default]
+    Locked,
+    Key(Secret<String>),
+}
+
+impl MasterKey {
+    #[cfg(test)]
+    #[inline(always)]
+    pub(crate) fn new_key(key: String) -> MasterKey {
+        MasterKey::Key(Secret::new(key))
+    }
+
+    pub(crate) fn as_secret_string(&self) -> Secret<String> {
+        match self {
+            MasterKey::Locked => Secret::new(String::new()),
+            MasterKey::Key(key) => key.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl AuthProvider for MasterKey {
+    #[inline]
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
+        match self {
+            MasterKey::Locked => false,
+            MasterKey::Key(sec_pw) => constant_time_eq::constant_time_eq(
+                creds.password.reveal_str().as_bytes(),
+                sec_pw.reveal_str().as_bytes(),
+            ),
+        }
+    }
+
+    /// Check if the given user has access to the given repo.
+    #[inline]
+    async fn has_access_to(&self, _username: &str, _namespace: &str, _image: &str) -> bool {
+        true
+    }
+}
+
+impl<'de> Deserialize<'de> for MasterKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Option::<String>::deserialize(deserializer)?
+            .map(Secret::new)
+            .map(MasterKey::Key)
+            .unwrap_or(MasterKey::Locked))
     }
 }

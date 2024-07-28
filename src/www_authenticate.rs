@@ -47,7 +47,7 @@ pub(crate) fn basic_auth_response(input: &[u8]) -> IResult<&[u8], BasicAuthRespo
 
 #[cfg(test)]
 mod tests {
-    use crate::registry::www_authenticate::{basic_auth_response, BasicAuthResponse};
+    use crate::www_authenticate::{basic_auth_response, BasicAuthResponse};
 
     #[test]
     fn can_parse_known_response() {

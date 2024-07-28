@@ -1,5 +1,7 @@
 #!/bin/sh
 
+# TODO: This file is leftover from `rockslide` and probably needs to be adapted.
+
 export REGISTRY_ADDR=127.0.0.1:3000
 
 if [ "x$PODMAN_IS_REMOTE" == "xtrue" ]; then
