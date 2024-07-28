@@ -122,10 +122,10 @@ impl AuthProvider for HashMap<String, Secret<String>> {
         }: &UnverifiedCredentials,
     ) -> bool {
         if let Some(correct_password) = self.get(unverified_username) {
-            // TODO: Use constant-time compare. Maybe add to `sec`?
-            if correct_password == unverified_password {
-                return true;
-            }
+            return constant_time_eq::constant_time_eq(
+                correct_password.reveal().as_bytes(),
+                unverified_password.reveal().as_bytes(),
+            );
         }
 
         false
