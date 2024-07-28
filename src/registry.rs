@@ -101,14 +101,14 @@ pub(crate) struct ContainerRegistry {
 impl ContainerRegistry {
     pub(crate) fn new<P: AsRef<std::path::Path>, T: RegistryHooks + 'static>(
         storage_path: P,
-        orchestrator: T,
+        hooks: T,
         auth_provider: Arc<dyn AuthProvider>,
     ) -> Result<Arc<Self>, FilesystemStorageError> {
         Ok(Arc::new(ContainerRegistry {
             realm: "ContainerRegistry".to_string(),
             auth_provider: auth_provider,
             storage: Box::new(FilesystemStorage::new(storage_path)?),
-            hooks: Box::new(orchestrator),
+            hooks: Box::new(hooks),
         }))
     }
 

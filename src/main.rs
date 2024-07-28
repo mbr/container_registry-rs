@@ -1,8 +1,6 @@
 mod config;
-mod container_orchestrator;
 pub(crate) mod podman;
 pub(crate) mod registry;
-mod reverse_proxy;
 
 use std::{
     net::{IpAddr, SocketAddr, ToSocketAddrs},
@@ -14,14 +12,11 @@ use axum::{extract::DefaultBodyLimit, Router};
 
 use gethostname::gethostname;
 use registry::ContainerRegistry;
-use reverse_proxy::ReverseProxy;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{
-    config::load_config, container_orchestrator::ContainerOrchestrator, podman::podman_is_remote,
-};
+use crate::{config::load_config, podman::podman_is_remote};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -65,27 +60,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!(%local_addr, "guessed local registry (i.e. our) address");
 
-    let reverse_proxy = ReverseProxy::new(auth_provider.clone());
-
-    let credentials = ("rockslide-podman".to_owned(), rockslide_pw);
-    let orchestrator = Arc::new(ContainerOrchestrator::new(
-        &cfg.containers.podman_path,
-        reverse_proxy.clone(),
-        local_addr,
-        credentials,
-        &cfg.registry.storage_path,
-    )?);
-    reverse_proxy.set_orchestrator(orchestrator.clone());
-
-    // TODO: Probably should not fail if synchronization fails.
-    orchestrator.synchronize_all().await?;
-    orchestrator.updated_published_set().await;
-
-    let registry = ContainerRegistry::new(&cfg.registry.storage_path, orchestrator, auth_provider)?;
+    let registry = ContainerRegistry::new(&cfg.registry.storage_path, (), auth_provider)?;
 
     let app = Router::new()
         .merge(registry.make_router())
-        .merge(reverse_proxy.make_router())
         .layer(DefaultBodyLimit::max(1024 * 1024)) // See #43.
         .layer(TraceLayer::new_for_http());
 
