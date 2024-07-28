@@ -1,4 +1,6 @@
+#![doc = include_str!("../README.md")]
 //! Open Container / "Docker" registry
+//!
 //!
 //! ## Specs
 //!
