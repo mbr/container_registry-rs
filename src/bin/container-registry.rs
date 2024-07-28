@@ -1,10 +1,12 @@
-use std::{fmt, fs, net::SocketAddr, path, process::ExitCode};
+use std::{fmt, fs, net::SocketAddr, path, process::ExitCode, sync::Arc};
 
 use anyhow::Context;
-use axum::{extract::DefaultBodyLimit, Router};
+use axum::{async_trait, extract::DefaultBodyLimit, Router};
+use container_registry::{auth::AuthProvider, hooks::RegistryHooks, storage::ManifestReference};
+use sec::Secret;
 use structopt::StructOpt;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn, Level};
 
 #[derive(Debug, StructOpt)]
 struct Opts {
@@ -14,11 +16,27 @@ struct Opts {
     /// Directory to use as storage.
     #[structopt(short, long)]
     storage: Option<path::PathBuf>,
+    /// Password to require.
+    #[structopt(short, long)]
+    password: Option<String>,
+}
+
+struct LoggingHook;
+
+#[async_trait]
+
+impl RegistryHooks for LoggingHook {
+    /// Notify about an uploaded manifest.
+    async fn on_manifest_uploaded(&self, manifest_reference: &ManifestReference) {
+        info!(%manifest_reference, "new manifest uploaded");
+    }
 }
 
 async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(Level::INFO.into()),
+        )
         .init();
 
     let opts = Opts::from_args();
@@ -39,12 +57,18 @@ async fn run() -> anyhow::Result<()> {
         (Some(tmp_dir), storage)
     };
 
-    let registry = container_registry::ContainerRegistry::new(
-        storage,
-        Box::new(()),
-        std::sync::Arc::new(true),
-    )
-    .context("failed to instantiate registry")?;
+    let auth_provider: Arc<dyn AuthProvider> = if let Some(password) = opts.password {
+        info!("using password supplied on command line");
+        let password = Secret::new(password);
+        Arc::new(password)
+    } else {
+        warn!("no password set, allowing access with any credential");
+        Arc::new(true)
+    };
+
+    let registry =
+        container_registry::ContainerRegistry::new(storage, Box::new(LoggingHook), auth_provider)
+            .context("failed to instantiate registry")?;
 
     let app = Router::new()
         .merge(registry.make_router())
