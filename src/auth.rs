@@ -24,7 +24,6 @@ use axum::{
     },
 };
 use sec::Secret;
-use serde::Deserialize;
 
 use super::{
     www_authenticate::{self},

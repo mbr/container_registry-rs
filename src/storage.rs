@@ -115,13 +115,6 @@ impl ManifestReference {
     pub fn reference(&self) -> &Reference {
         &self.reference
     }
-
-    pub(crate) fn namespaced_dir<P: AsRef<Path>>(&self, base: P) -> PathBuf {
-        base.as_ref()
-            .join(self.location.repository())
-            .join(self.location.image())
-            .join(self.reference.to_string().trim_start_matches(':'))
-    }
 }
 
 impl ImageLocation {
@@ -209,20 +202,26 @@ impl Display for Reference {
     }
 }
 
+/// A storage error.
 #[derive(Debug, Error)]
-pub(crate) enum Error {
+pub enum Error {
+    /// Attempted to submit data to an upload that does not exist.
     #[error("given upload does not exist")]
     UploadDoesNotExit,
+    /// A content hash mismatched.
     #[error("digest did not match")]
     DigestMismatch,
-
-    // Not great to have a catch-all IO error, to be replaced later.
+    /// An IO error.
+    // TODO: Not great to have a catch-all IO error, to be replaced later.
     #[error("io error")]
     Io(io::Error),
+    /// A background task panicked.
     #[error("background task panicked")]
     BackgroundTaskPanicked(#[source] tokio::task::JoinError),
+    /// Invalid image manifest submitted.
     #[error("invalid image manifest")]
     InvalidManifest(#[source] serde_json::Error),
+    /// Attempted to store a manifest under a digest instead of a tag.
     #[error("cannot store manifest under hash")]
     NotATag,
 }

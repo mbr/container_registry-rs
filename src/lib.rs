@@ -69,7 +69,7 @@ use uuid::Uuid;
 pub(crate) use {
     auth::{AuthProvider, UnverifiedCredentials},
     hooks::RegistryHooks,
-    storage::{FilesystemStorageError, ManifestReference, Reference},
+    storage::{FilesystemStorageError, ManifestReference},
 };
 
 /// A container registry error.
@@ -132,17 +132,17 @@ impl IntoResponse for RegistryError {
                 format!("invalid content length value: {}", err),
             )
                 .into_response(),
-            RegistryError::IncomingReadFailed(err) => (
+            RegistryError::IncomingReadFailed(_err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "could not read input stream",
             )
                 .into_response(),
-            RegistryError::LocalWriteFailed(err) => (
+            RegistryError::LocalWriteFailed(_err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "could not write image locally",
             )
                 .into_response(),
-            RegistryError::AxumHttp(err) => (
+            RegistryError::AxumHttp(_err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 // Fixed message, we don't want to leak anything. This should never happen anyway.
                 "error building axum HTTP response",
@@ -632,7 +632,7 @@ mod tests {
     impl Context {
         fn basic_auth(&self) -> String {
             let encoded = base64::prelude::BASE64_STANDARD
-                .encode(&format!("user:{}", self.password).as_bytes());
+                .encode(format!("user:{}", self.password).as_bytes());
             format!("Basic {}", encoded)
         }
 
