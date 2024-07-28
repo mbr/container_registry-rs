@@ -1,5 +1,4 @@
 mod config;
-pub(crate) mod podman;
 pub(crate) mod registry;
 
 use std::{
@@ -16,7 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{config::load_config, podman::podman_is_remote};
+use crate::config::load_config;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

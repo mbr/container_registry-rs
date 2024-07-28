@@ -6,10 +6,7 @@ use constant_time_eq::constant_time_eq;
 use sec::Secret;
 use serde::Deserialize;
 
-use crate::{
-    podman::podman_is_remote,
-    registry::{AuthProvider, UnverifiedCredentials},
-};
+use crate::registry::{AuthProvider, UnverifiedCredentials};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,11 +147,7 @@ impl Default for ReverseProxyConfig {
 }
 
 fn default_http_bind() -> SocketAddr {
-    if podman_is_remote() {
-        ([0, 0, 0, 0], 3000).into()
-    } else {
-        ([127, 0, 0, 1], 3000).into()
-    }
+    ([127, 0, 0, 1], 3000).into()
 }
 
 pub(crate) fn load_config() -> anyhow::Result<Config> {
