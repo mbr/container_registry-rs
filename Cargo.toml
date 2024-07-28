@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1.0.75"
-axum = { version = "0.7.4", features = [ "tracing" ] }
+axum = { version = "0.7.5", features = [ "tracing" ] }
 base64 = "0.21.5"
 constant_time_eq = "0.3.0"
 futures = "0.3.29"
