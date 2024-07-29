@@ -1,8 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* Manifest upload now also returns the correct location error.
+
 ## [0.1.1] - 2024-07-29
 
-## Fixed
+### Fixed
 
 * Upload finalization now returns the required `Location` header, making it work with the [`oci-distribution`](https://docs.rs/oci-distribution) crate.
 
