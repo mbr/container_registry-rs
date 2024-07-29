@@ -291,7 +291,7 @@ async fn blob_get(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .body(body)
-        .unwrap())
+        .expect("Building a streaming response with body works. qed"))
 }
 
 /// Initiates a new blob upload.
@@ -503,11 +503,12 @@ struct DigestQuery {
 /// Finishes an upload.
 async fn upload_finalize(
     State(registry): State<Arc<ContainerRegistry>>,
-    Path((_, _, upload)): Path<(String, String, Uuid)>,
+    Path((repository, image, upload)): Path<(String, String, Uuid)>,
     Query(DigestQuery { digest }): Query<DigestQuery>,
     _auth: ValidUser,
     request: axum::extract::Request,
 ) -> Result<Response<Body>, RegistryError> {
+    let location = ImageLocation::new(repository, image);
     // We do not support the final chunk in the `PUT` call, so ensure that's not the case.
     match request.headers().get(CONTENT_LENGTH) {
         Some(value) => {
@@ -538,6 +539,7 @@ async fn upload_finalize(
     Ok(Response::builder()
         .status(StatusCode::CREATED)
         .header("Docker-Content-Digest", digest.to_string())
+        .header(LOCATION, mk_upload_location(&location, upload))
         .body(Body::empty())?)
 }
 
