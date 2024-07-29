@@ -25,6 +25,6 @@ The crate has not been thoroughly battle tested in contested production environm
 
 `container-registry` includes a bare-bones installable binary that exposes most of its features from the command line. It is automatically built if the `bin` features is enabled:
 
-```
+```sh
 cargo install container-registry --features bin
 ```
