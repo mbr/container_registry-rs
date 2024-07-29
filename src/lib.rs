@@ -60,6 +60,7 @@ use axum::{
 use futures::stream::StreamExt;
 use hex::FromHex;
 use serde::{Deserialize, Deserializer, Serialize};
+use storage::Reference;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -317,6 +318,13 @@ fn mk_upload_location(location: &ImageLocation, uuid: Uuid) -> String {
     format!("/v2/{repository}/{image}/uploads/{uuid}")
 }
 
+/// Returns the URI for a specific part of an upload.
+fn mk_manifest_location(location: &ImageLocation, reference: &Reference) -> String {
+    let repository = &location.repository();
+    let image = &location.image();
+    format!("/v2/{repository}/{image}/manifests/{reference}")
+}
+
 /// Image upload state.
 ///
 /// Represents the state of a partial upload of a specific blob, which may be uploaded in chunks.
@@ -562,10 +570,15 @@ async fn manifest_put(
         .on_manifest_uploaded(&manifest_reference)
         .await;
 
-    // TODO: Return manifest URL.
     Ok(Response::builder()
         .status(StatusCode::CREATED)
-        .header(LOCATION, "http://localhost:3000/TODO")
+        .header(
+            LOCATION,
+            mk_manifest_location(
+                manifest_reference.location(),
+                manifest_reference.reference(),
+            ),
+        )
         .header(CONTENT_LENGTH, 0)
         .header(
             "Docker-Content-Digest",
