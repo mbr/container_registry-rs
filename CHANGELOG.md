@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+## Fixed
+
+* Upload finalization now returns the required `Location` header, making it work with the [`oci-distribution`](https://docs.rs/oci-distribution) crate.
+
 ## [0.1.0] - 2024-07-29
 
 ### Added
