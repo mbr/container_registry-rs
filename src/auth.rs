@@ -12,7 +12,7 @@
 //! To provide some safety against accidentally leaking passwords via stray `Debug` implementations,
 //! this crate uses the [`sec`]'s crate [`Secret`] type.
 
-use std::{collections::HashMap, str, sync::Arc};
+use std::{any::Any, collections::HashMap, str, sync::Arc};
 
 use axum::{
     async_trait,
@@ -107,24 +107,18 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
 /// At the moment, `container-registry` gives full access to any valid user.
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
-    type VerifiedCredentials;
-
     /// Determines whether the supplied credentials are valid.
     ///
-    /// Must return `true` if and only if the given unverified credentials are valid.
-    async fn check_credentials(
-        &self,
-        creds: &UnverifiedCredentials,
-    ) -> Option<Self::VerifiedCredentials>;
+    /// Must return `None` if the credentials are not valid at all, or may return any set of
+    /// provider specific credentials (e.g. a username or ID) if they are valid.
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<Box<dyn Any>>;
 }
 
 #[async_trait]
 impl AuthProvider for bool {
-    type VerifiedCredentials = ();
-
-    async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> Option<()> {
-        if self {
-            Some(())
+    async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> Option<Box<dyn Any>> {
+        if *self {
+            Some(Box::new(()))
         } else {
             None
         }
@@ -133,27 +127,25 @@ impl AuthProvider for bool {
 
 #[async_trait]
 impl AuthProvider for HashMap<String, Secret<String>> {
-    type VerifiedCredentials = String;
-
     async fn check_credentials(
         &self,
         UnverifiedCredentials {
             username: unverified_username,
             password: unverified_password,
         }: &UnverifiedCredentials,
-    ) -> bool {
+    ) -> Option<Box<dyn Any>> {
         if let Some(correct_password) = self.get(unverified_username) {
             if constant_time_eq::constant_time_eq(
                 correct_password.reveal().as_bytes(),
                 unverified_password.reveal().as_bytes(),
             ) {
-                Some(unverified_username.clone())
+                return Some(Box::new(unverified_username.clone()));
             } else {
-                None
+                return None;
             }
         }
 
-        false
+        None
     }
 }
 
@@ -162,13 +154,8 @@ impl<T> AuthProvider for Box<T>
 where
     T: AuthProvider,
 {
-    type VerifiedCredentials = <T as AuthProvider>::VerifiedCredentials;
-
     #[inline(always)]
-    async fn check_credentials(
-        &self,
-        creds: &UnverifiedCredentials,
-    ) -> Option<Self::VerifiedCredentials> {
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<Box<dyn Any>> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
@@ -178,28 +165,21 @@ impl<T> AuthProvider for Arc<T>
 where
     T: AuthProvider,
 {
-    type VerifiedCredentials = <T as AuthProvider>::VerifiedCredentials;
-
     #[inline(always)]
-    async fn check_credentials(
-        &self,
-        creds: &UnverifiedCredentials,
-    ) -> Option<Self::VerifiedCredentials> {
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<Box<dyn Any>> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
 
 #[async_trait]
 impl AuthProvider for Secret<String> {
-    type VerifiedCredentials = ();
-
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<()> {
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<Box<dyn Any>> {
         if constant_time_eq::constant_time_eq(
             creds.password.reveal().as_bytes(),
             self.reveal().as_bytes(),
         ) {
-            Some(())
+            Some(Box::new(()))
         } else {
             None
         }
