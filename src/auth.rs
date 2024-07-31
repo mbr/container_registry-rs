@@ -102,21 +102,34 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
 /// At the moment, `container-registry` gives full access to any valid user.
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
+    type VerifiedCredentials;
+
     /// Determines whether the supplied credentials are valid.
     ///
     /// Must return `true` if and only if the given unverified credentials are valid.
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool;
+    async fn check_credentials(
+        &self,
+        creds: &UnverifiedCredentials,
+    ) -> Option<Self::VerifiedCredentials>;
 }
 
 #[async_trait]
 impl AuthProvider for bool {
-    async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> bool {
-        *self
+    type VerifiedCredentials = ();
+
+    async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> Option<()> {
+        if self {
+            Some(())
+        } else {
+            None
+        }
     }
 }
 
 #[async_trait]
 impl AuthProvider for HashMap<String, Secret<String>> {
+    type VerifiedCredentials = String;
+
     async fn check_credentials(
         &self,
         UnverifiedCredentials {
@@ -125,10 +138,14 @@ impl AuthProvider for HashMap<String, Secret<String>> {
         }: &UnverifiedCredentials,
     ) -> bool {
         if let Some(correct_password) = self.get(unverified_username) {
-            return constant_time_eq::constant_time_eq(
+            if constant_time_eq::constant_time_eq(
                 correct_password.reveal().as_bytes(),
                 unverified_password.reveal().as_bytes(),
-            );
+            ) {
+                Some(unverified_username.clone())
+            } else {
+                None
+            }
         }
 
         false
@@ -140,8 +157,13 @@ impl<T> AuthProvider for Box<T>
 where
     T: AuthProvider,
 {
+    type VerifiedCredentials = <T as AuthProvider>::VerifiedCredentials;
+
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
+    async fn check_credentials(
+        &self,
+        creds: &UnverifiedCredentials,
+    ) -> Option<Self::VerifiedCredentials> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
@@ -151,19 +173,30 @@ impl<T> AuthProvider for Arc<T>
 where
     T: AuthProvider,
 {
+    type VerifiedCredentials = <T as AuthProvider>::VerifiedCredentials;
+
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
+    async fn check_credentials(
+        &self,
+        creds: &UnverifiedCredentials,
+    ) -> Option<Self::VerifiedCredentials> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
 
 #[async_trait]
 impl AuthProvider for Secret<String> {
+    type VerifiedCredentials = ();
+
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> bool {
-        constant_time_eq::constant_time_eq(
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<()> {
+        if constant_time_eq::constant_time_eq(
             creds.password.reveal().as_bytes(),
             self.reveal().as_bytes(),
-        )
+        ) {
+            Some(())
+        } else {
+            None
+        }
     }
 }
