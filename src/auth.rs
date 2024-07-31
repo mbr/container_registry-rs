@@ -89,7 +89,12 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
         let unverified = UnverifiedCredentials::from_request_parts(parts, state).await?;
 
         // We got a set of credentials, now verify.
-        if !state.auth_provider.check_credentials(&unverified).await {
+        if !state
+            .auth_provider
+            .check_credentials(&unverified)
+            .await
+            .is_some()
+        {
             Err(StatusCode::UNAUTHORIZED)
         } else {
             Ok(Self(unverified.username))

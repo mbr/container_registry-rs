@@ -233,7 +233,12 @@ async fn index_v2(
     let realm = &registry.realm;
 
     if let Some(creds) = credentials {
-        if registry.auth_provider.check_credentials(&creds).await {
+        if registry
+            .auth_provider
+            .check_credentials(&creds)
+            .await
+            .is_some()
+        {
             return Response::builder()
                 .status(StatusCode::OK)
                 .header("WWW-Authenticate", format!("Basic realm=\"{realm}\""))
