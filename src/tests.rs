@@ -507,6 +507,19 @@ async fn missing_manifest_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[test]
+fn run_in_background_in_sync_test() {
+    let ctx = ContainerRegistry::builder().build_for_testing();
+    let running = ctx.run_in_background();
+
+    // Wait a bit.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // TODO: Test HTTP interface (don't want to pull in deps for this at the moment).
+
+    drop(running);
+}
+
 async fn collect_body(mut body: Body) -> Vec<u8> {
     let mut rv = Vec::new();
     while let Some(frame_result) = body.frame().await {

@@ -116,13 +116,13 @@ impl TestingContainerRegistry {
             .expect("could not set listener to non-blocking");
         let bound_addr = listener.local_addr().expect("failed to get local address");
 
-        let listener =
-            tokio::net::TcpListener::from_std(listener).expect("could not create tokio listener");
-
         let (shutdown_sender, mut shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
         let rt = Runtime::new().expect("could not create tokio runtime");
         let join_handle = thread::spawn(move || {
             rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener)
+                    .expect("could not create tokio listener");
+
                 axum::serve(listener, app)
                     .with_graceful_shutdown(async move {
                         shutdown_receiver.recv().await;
@@ -182,7 +182,7 @@ impl ContainerRegistryBuilder {
         TestingContainerRegistry {
             registry,
             temp_storage,
-            bind_addr: ([127, 0, 0, 1], 10101).into(),
+            bind_addr: ([127, 0, 0, 1], 0).into(),
             body_limit: 100 * 1024 * 1024,
         }
     }
