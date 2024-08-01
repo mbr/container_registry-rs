@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* `AuthProvider`s can now grant fine grained permissions based on location or blob digest.
+* An `Anonymous<A>` auth provider is now available that allows granting access to clients without credentials.
+
+### Changed
+
+* The `AuthProvider` API has changed to also include permissions.
+
 ## [0.1.2] - 2024-07-29
 
 ### Fixed
