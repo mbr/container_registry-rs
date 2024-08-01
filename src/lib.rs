@@ -818,75 +818,48 @@ mod tests {
             header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, LOCATION},
             Request, StatusCode,
         },
-        routing::RouterIntoService,
     };
     use base64::Engine;
     use http_body_util::BodyExt;
     use sec::Secret;
-    use tempdir::TempDir;
     use tokio::io::AsyncWriteExt;
     use tower::{util::ServiceExt, Service};
-    use tower_http::trace::TraceLayer;
 
     use crate::{
-        auth::{Anonymous, Permissions},
         storage::{ImageLocation, ManifestReference, Reference},
-        ImageDigest,
+        ImageDigest, TestingContainerRegistry,
     };
 
     use super::{storage::Digest, ContainerRegistry};
 
-    struct Context {
-        _tmp: TempDir,
-        password: String,
-        registry: Arc<ContainerRegistry>,
+    /// Constructs a basic auth header with the [`TEST_PASSWORD`].
+    fn basic_auth() -> String {
+        let encoded =
+            base64::prelude::BASE64_STANDARD.encode(format!("user:{}", TEST_PASSWORD).as_bytes());
+        format!("Basic {}", encoded)
     }
 
-    impl Context {
-        fn basic_auth(&self) -> String {
-            let encoded = base64::prelude::BASE64_STANDARD
-                .encode(format!("user:{}", self.password).as_bytes());
-            format!("Basic {}", encoded)
-        }
-
-        fn invalid_basic_auth(&self) -> String {
-            let not_the_password = "user:not-the-password".to_owned() + self.password.as_str();
-            let encoded = base64::prelude::BASE64_STANDARD.encode(not_the_password.as_bytes());
-            format!("Basic {}", encoded)
-        }
+    /// Constructs a basic auth header that is guaranteed to NOT be the [`TEST_PASSWORD`].
+    fn invalid_basic_auth() -> String {
+        let not_the_password = "user:not-the-password".to_owned() + TEST_PASSWORD;
+        let encoded = base64::prelude::BASE64_STANDARD.encode(not_the_password.as_bytes());
+        format!("Basic {}", encoded)
     }
 
-    fn mk_test_app() -> (Context, RouterIntoService<Body>) {
-        let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
+    const TEST_PASSWORD: &str = "random-test-password";
 
-        let password = "random-test-password".to_owned();
-        let master_key = Arc::new(Secret::new(password.clone()));
+    fn registry_with_test_password() -> TestingContainerRegistry {
+        let ctx = ContainerRegistry::builder()
+            .auth_provider(Arc::new(Secret::new(TEST_PASSWORD.to_owned())))
+            .build_for_testing();
 
-        let registry = ContainerRegistry::builder()
-            .storage(tmp.as_ref())
-            .auth_provider(master_key)
-            .build()
-            .expect("should not fail to create app");
-        let router = registry
-            .clone()
-            .make_router()
-            .layer(TraceLayer::new_for_http());
-
-        let service = router.into_service::<Body>();
-
-        (
-            Context {
-                registry,
-                _tmp: tmp,
-                password,
-            },
-            service,
-        )
+        ctx
     }
 
     #[tokio::test]
     async fn refuses_access_without_valid_credentials() {
-        let (ctx, mut service) = mk_test_app();
+        let ctx = registry_with_test_password();
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         let targets = [("GET", "/v2/")];
@@ -912,7 +885,7 @@ mod tests {
                     Request::builder()
                         .method(method)
                         .uri(endpoint)
-                        .header(AUTHORIZATION, ctx.invalid_basic_auth())
+                        .header(AUTHORIZATION, invalid_basic_auth())
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -925,7 +898,7 @@ mod tests {
                 .call(
                     Request::builder()
                         .uri("/v2/")
-                        .header(AUTHORIZATION, ctx.basic_auth())
+                        .header(AUTHORIZATION, basic_auth())
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -958,7 +931,8 @@ mod tests {
     #[tokio::test]
     async fn chunked_upload() {
         // See https://github.com/opencontainers/distribution-spec/blob/v1.0.1/spec.md#pushing-a-blob-in-chunks
-        let (ctx, mut service) = mk_test_app();
+        let ctx = registry_with_test_password();
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         // Step 1: POST for new blob upload.
@@ -966,7 +940,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("POST")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri("/v2/tests/sample/blobs/uploads/")
                     .body(Body::empty())
                     .unwrap(),
@@ -995,7 +969,7 @@ mod tests {
                 .call(
                     Request::builder()
                         .method("PATCH")
-                        .header(AUTHORIZATION, ctx.basic_auth())
+                        .header(AUTHORIZATION, basic_auth())
                         .header(CONTENT_LENGTH, chunk.len())
                         .header(CONTENT_RANGE, range)
                         .uri(&put_location)
@@ -1013,7 +987,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("PUT")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(put_location + "?digest=" + IMAGE_DIGEST.to_string().as_str())
                     .body(Body::empty())
                     .unwrap(),
@@ -1037,7 +1011,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("HEAD")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(blob_location)
                     .body(Body::empty())
                     .unwrap(),
@@ -1063,7 +1037,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("PUT")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(manifest_by_tag_location)
                     .body(Body::from(RAW_MANIFEST))
                     .unwrap(),
@@ -1237,7 +1211,8 @@ mod tests {
 
     #[tokio::test]
     async fn image_download() {
-        let (ctx, mut service) = mk_test_app();
+        let ctx = registry_with_test_password();
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         let manifest_ref_by_tag = ManifestReference::new(
@@ -1283,7 +1258,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("GET")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(manifest_by_tag_location)
                     .body(Body::empty())
                     .unwrap(),
@@ -1299,7 +1274,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("GET")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(manifest_by_digest_location)
                     .body(Body::empty())
                     .unwrap(),
@@ -1316,7 +1291,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("GET")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(format!("/v2/testing/sample/blobs/{}", IMAGE_DIGEST))
                     .body(Body::empty())
                     .unwrap(),
@@ -1331,14 +1306,15 @@ mod tests {
 
     #[tokio::test]
     async fn missing_manifest_returns_404() {
-        let (ctx, mut service) = mk_test_app();
+        let ctx = registry_with_test_password();
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         let response = app
             .call(
                 Request::builder()
                     .method("GET")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri("/v2/doesnot/exist/manifests/latest")
                     .body(Body::empty())
                     .unwrap(),
