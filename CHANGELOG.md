@@ -6,6 +6,7 @@
 
 * `AuthProvider`s can now grant fine grained permissions based on location or blob digest.
 * An `Anonymous<A>` auth provider is now available that allows granting access to clients without credentials.
+* Additional functionality for using the registry in unit tests has been added in the form of `build_for_testing`.
 
 ### Changed
 
