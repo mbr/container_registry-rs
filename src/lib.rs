@@ -8,15 +8,23 @@
 //!
 //! ```
 //!# use axum::{extract::DefaultBodyLimit, Router};
+//! use container_registry::auth;
+//! use sec::Secret;
+//!
 //! // The registry requires an existing (empty) directory, which it will initialize.
 //! let storage = tempdir::TempDir::new("container_registry_test")
 //!     .expect("could not create storage dir");
+//!
+//! // Setup an auth scheme that allows uploading with a master password, read-only
+//! // access otherwise.
+//! let auth = auth::Anonymous::new(auth::Permissions::ReadOnly,
+//!                                 Secret::new("master password".to_owned()));
 //!
 //! // Instantiate the registry.
 //! let registry = container_registry::ContainerRegistry::new(
 //!     storage.path(),
 //!     Box::new(()),
-//!     std::sync::Arc::new(true)
+//!     std::sync::Arc::new(auth)
 //! ).expect("failed to instantiate registry");
 //!
 //! // Create an axum app router and mount our new registry on it.
@@ -42,10 +50,11 @@ use std::{
 };
 
 use self::{
-    auth::ValidUser,
+    auth::ValidCredentials,
     storage::{FilesystemStorage, ImageLocation, RegistryStorage},
     types::{ImageManifest, OciError, OciErrors},
 };
+use auth::MissingPermission;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -68,7 +77,7 @@ use tracing::info;
 use uuid::Uuid;
 
 pub(crate) use {
-    auth::{AuthProvider, UnverifiedCredentials},
+    auth::{AuthProvider, Unverified},
     hooks::RegistryHooks,
     storage::{FilesystemStorageError, ManifestReference},
 };
@@ -82,6 +91,9 @@ pub enum RegistryError {
     /// A requested item (eg. manifest, blob, etc.) was not found.
     #[error("missing item")]
     NotFound,
+    /// Access to a resource was denied.
+    #[error("permission denied")]
+    PermissionDenied(#[from] MissingPermission),
     /// Error in storage backend.
     #[error(transparent)]
     // TODO: Remove `from` impl.
@@ -115,6 +127,12 @@ impl IntoResponse for RegistryError {
             RegistryError::NotFound => (
                 StatusCode::NOT_FOUND,
                 OciErrors::single(OciError::new(types::ErrorCode::BlobUnknown)),
+            )
+                .into_response(),
+            RegistryError::PermissionDenied(_) => (
+                StatusCode::FORBIDDEN,
+                // TODO: Should this be a proper OCI error?
+                "access to request resource was denied",
             )
                 .into_response(),
             RegistryError::Storage(err) => err.into_response(),
@@ -228,18 +246,23 @@ impl ContainerRegistry {
 /// UNAUTHORIZED.
 async fn index_v2(
     State(registry): State<Arc<ContainerRegistry>>,
-    credentials: Option<UnverifiedCredentials>,
+    unverified: Unverified,
 ) -> Response<Body> {
     let realm = &registry.realm;
 
-    if let Some(creds) = credentials {
-        if registry.auth_provider.check_credentials(&creds).await {
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header("WWW-Authenticate", format!("Basic realm=\"{realm}\""))
-                .body(Body::empty())
-                .unwrap();
-        }
+    // TODO: This code duplicates some of the extraction logic of `Unverified` -- and how does it work for anonymous access?
+    if !unverified.is_no_credentials()
+        && registry
+            .auth_provider
+            .check_credentials(&unverified)
+            .await
+            .is_some()
+    {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("WWW-Authenticate", format!("Basic realm=\"{realm}\""))
+            .body(Body::empty())
+            .unwrap();
     }
 
     // Return `UNAUTHORIZED`, since we want the client to supply credentials.
@@ -254,8 +277,14 @@ async fn index_v2(
 async fn blob_check(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
-    _auth: ValidUser,
+    creds: ValidCredentials,
 ) -> Result<Response, RegistryError> {
+    registry
+        .auth_provider
+        .blob_permissions(&creds, &image)
+        .await
+        .require_read()?;
+
     if let Some(metadata) = registry.storage.get_blob_metadata(image.digest).await? {
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -276,8 +305,14 @@ async fn blob_check(
 async fn blob_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
-    _auth: ValidUser,
+    creds: ValidCredentials,
 ) -> Result<Response, RegistryError> {
+    registry
+        .auth_provider
+        .blob_permissions(&creds, &image)
+        .await
+        .require_read()?;
+
     // TODO: Get size for `Content-length` header.
 
     let reader = registry
@@ -299,8 +334,14 @@ async fn blob_get(
 async fn upload_new(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
-    _auth: ValidUser,
+    creds: ValidCredentials,
 ) -> Result<UploadState, RegistryError> {
+    registry
+        .auth_provider
+        .image_permissions(&creds, &location)
+        .await
+        .require_write()?;
+
     // Initiate a new upload
     let upload = registry.storage.begin_new_upload().await?;
 
@@ -375,7 +416,7 @@ struct UploadId {
 /// An image hash.
 ///
 /// Currently only SHA256 hashes are supported.
-struct ImageDigest {
+pub struct ImageDigest {
     /// The actual image digest.
     digest: storage::Digest,
 }
@@ -407,11 +448,16 @@ impl ImageDigest {
     pub const fn new(digest: storage::Digest) -> Self {
         Self { digest }
     }
+
+    /// Returns the actual digest.
+    pub fn digest(&self) -> storage::Digest {
+        self.digest
+    }
 }
 
 /// Error parsing a specific image digest.
 #[derive(Debug, Error)]
-enum ImageDigestParseError {
+pub enum ImageDigestParseError {
     /// The given digest was of the wrong length.
     #[error("wrong length")]
     WrongLength,
@@ -462,9 +508,15 @@ async fn upload_add_chunk(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
     Path(UploadId { upload }): Path<UploadId>,
-    _auth: ValidUser,
+    creds: ValidCredentials,
     request: axum::extract::Request,
 ) -> Result<UploadState, RegistryError> {
+    registry
+        .auth_provider
+        .image_permissions(&creds, &location)
+        .await
+        .require_write()?;
+
     // Check if we have a range - if so, its an unsupported feature, namely monolith uploads.
     if request.headers().contains_key(RANGE) {
         return Err(RegistryError::NotSupported(
@@ -513,10 +565,17 @@ async fn upload_finalize(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((repository, image, upload)): Path<(String, String, Uuid)>,
     Query(DigestQuery { digest }): Query<DigestQuery>,
-    _auth: ValidUser,
+    creds: ValidCredentials,
     request: axum::extract::Request,
 ) -> Result<Response<Body>, RegistryError> {
     let location = ImageLocation::new(repository, image);
+
+    registry
+        .auth_provider
+        .image_permissions(&creds, &location)
+        .await
+        .require_write()?;
+
     // We do not support the final chunk in the `PUT` call, so ensure that's not the case.
     match request.headers().get(CONTENT_LENGTH) {
         Some(value) => {
@@ -555,9 +614,15 @@ async fn upload_finalize(
 async fn manifest_put(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
-    _auth: ValidUser,
+    creds: ValidCredentials,
     image_manifest_json: String,
 ) -> Result<Response<Body>, RegistryError> {
+    registry
+        .auth_provider
+        .image_permissions(&creds, manifest_reference.location())
+        .await
+        .require_write()?;
+
     let digest = registry
         .storage
         .put_manifest(&manifest_reference, image_manifest_json.as_bytes())
@@ -592,8 +657,14 @@ async fn manifest_put(
 async fn manifest_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
-    _auth: ValidUser,
+    creds: ValidCredentials,
 ) -> Result<Response<Body>, RegistryError> {
+    registry
+        .auth_provider
+        .image_permissions(&creds, manifest_reference.location())
+        .await
+        .require_read()?;
+
     let manifest_json = registry
         .storage
         .get_manifest(&manifest_reference)
@@ -632,6 +703,7 @@ mod tests {
     use tower_http::trace::TraceLayer;
 
     use crate::{
+        auth::{Anonymous, Permissions},
         storage::{ImageLocation, ManifestReference, Reference},
         ImageDigest,
     };
@@ -678,6 +750,32 @@ mod tests {
                 registry,
                 _tmp: tmp,
                 password,
+            },
+            service,
+        )
+    }
+
+    fn mk_anon_app() -> (Context, RouterIntoService<Body>) {
+        let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
+
+        let auth = Arc::new(Anonymous::new(
+            Permissions::ReadWrite,
+            Permissions::ReadWrite,
+        ));
+        let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), auth)
+            .expect("should not fail to create app");
+        let router = registry
+            .clone()
+            .make_router()
+            .layer(TraceLayer::new_for_http());
+
+        let service = router.into_service::<Body>();
+
+        (
+            Context {
+                registry,
+                _tmp: tmp,
+                password: "NOTSET".to_string(),
             },
             service,
         )
@@ -906,6 +1004,129 @@ mod tests {
                 .expect("failed to get reference by digest")
                 .expect("missing reference by digest"),
             RAW_MANIFEST
+        );
+    }
+
+    /// Similar to `chunked_upload`, but uses no credentials to log in.
+    #[tokio::test]
+    async fn anonymous_upload() {
+        let (ctx, mut service) = mk_anon_app();
+        let app = service.ready().await.expect("could not launch service");
+
+        // Step 1: POST for new blob upload.
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/tests/sample/blobs/uploads/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let put_location = response
+            .headers()
+            .get(LOCATION)
+            .expect("expected location header for blob upload")
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        // Step 2: PATCH blobs.
+        let mut sent = 0;
+        for chunk in RAW_IMAGE.chunks(32) {
+            assert!(!chunk.is_empty());
+            let range = format!("{sent}-{}", chunk.len() - 1);
+            sent += chunk.len();
+
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("PATCH")
+                        .header(CONTENT_LENGTH, chunk.len())
+                        .header(CONTENT_RANGE, range)
+                        .uri(&put_location)
+                        .body(Body::from(chunk))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+
+        // Step 3: PUT without (!) final body -- we do not support putting the final piece in `PUT`.
+        let response = app
+            .call(
+                Request::builder()
+                    .method("PUT")
+                    .uri(put_location + "?digest=" + IMAGE_DIGEST.to_string().as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Check the blob is available after.
+        let blob_location = format!("/v2/tests/sample/blobs/{}", IMAGE_DIGEST);
+        assert!(&ctx
+            .registry
+            .storage
+            .get_blob_reader(IMAGE_DIGEST.digest)
+            .await
+            .expect("could not access stored blob")
+            .is_some());
+
+        // Step 4: Client verifies existence of blob through `HEAD` request.
+        let response = app
+            .call(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(blob_location)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("Docker-Content-Digest")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            IMAGE_DIGEST.to_string()
+        );
+
+        // Step 5: Upload the manifest
+        let manifest_by_tag_location = "/v2/tests/sample/manifests/latest";
+
+        let response = app
+            .call(
+                Request::builder()
+                    .method("PUT")
+                    .uri(manifest_by_tag_location)
+                    .body(Body::from(RAW_MANIFEST))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get("Docker-Content-Digest")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            MANIFEST_DIGEST.to_string()
         );
     }
 
