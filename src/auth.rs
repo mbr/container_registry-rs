@@ -71,7 +71,14 @@ impl<S> FromRequestParts<S> for UnverifiedCredentials {
 
 /// A set of credentials that has been validated.
 #[derive(Debug)]
-pub struct ValidCredentials(Box<dyn Any + Send>);
+pub struct ValidCredentials(pub Box<dyn Any + Send>);
+
+impl ValidCredentials {
+    /// Creates a new set of valid credentials.
+    fn new<T: Send + 'static>(inner: T) -> Self {
+        ValidCredentials(Box::new(inner))
+    }
+}
 
 #[async_trait]
 impl FromRequestParts<Arc<ContainerRegistry>> for ValidCredentials {
@@ -85,7 +92,7 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidCredentials {
 
         // We got a set of credentials, now verify.
         match state.auth_provider.check_credentials(&unverified).await {
-            Some(creds) => Ok(Self(creds)),
+            Some(creds) => Ok(creds),
             None => Err(StatusCode::UNAUTHORIZED),
         }
     }
@@ -100,20 +107,14 @@ pub trait AuthProvider: Send + Sync {
     ///
     /// Must return `None` if the credentials are not valid at all, or may return any set of
     /// provider specific credentials (e.g. a username or ID) if they are valid.
-    async fn check_credentials(
-        &self,
-        creds: &UnverifiedCredentials,
-    ) -> Option<Box<dyn Any + Send + Send>>;
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<ValidCredentials>;
 }
 
 #[async_trait]
 impl AuthProvider for bool {
-    async fn check_credentials(
-        &self,
-        _creds: &UnverifiedCredentials,
-    ) -> Option<Box<dyn Any + Send>> {
+    async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> Option<ValidCredentials> {
         if *self {
-            Some(Box::new(()))
+            Some(ValidCredentials::new(()))
         } else {
             None
         }
@@ -125,7 +126,7 @@ impl AuthProvider for HashMap<String, Secret<String>> {
     async fn check_credentials(
         &self,
         unverified: &UnverifiedCredentials,
-    ) -> Option<Box<dyn Any + Send>> {
+    ) -> Option<ValidCredentials> {
         match unverified {
             UnverifiedCredentials::UsernameAndPassword {
                 username: unverified_username,
@@ -136,7 +137,7 @@ impl AuthProvider for HashMap<String, Secret<String>> {
                         correct_password.reveal().as_bytes(),
                         unverified_password.reveal().as_bytes(),
                     ) {
-                        return Some(Box::new(unverified_username.clone()));
+                        return Some(ValidCredentials::new(unverified_username.clone()));
                     }
                 }
 
@@ -153,10 +154,7 @@ where
     T: AuthProvider,
 {
     #[inline(always)]
-    async fn check_credentials(
-        &self,
-        creds: &UnverifiedCredentials,
-    ) -> Option<Box<dyn Any + Send>> {
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<ValidCredentials> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
@@ -167,10 +165,7 @@ where
     T: AuthProvider,
 {
     #[inline(always)]
-    async fn check_credentials(
-        &self,
-        creds: &UnverifiedCredentials,
-    ) -> Option<Box<dyn Any + Send>> {
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<ValidCredentials> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
@@ -178,10 +173,7 @@ where
 #[async_trait]
 impl AuthProvider for Secret<String> {
     #[inline(always)]
-    async fn check_credentials(
-        &self,
-        creds: &UnverifiedCredentials,
-    ) -> Option<Box<dyn Any + Send>> {
+    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<ValidCredentials> {
         match creds {
             UnverifiedCredentials::UsernameAndPassword {
                 username: _,
@@ -191,7 +183,7 @@ impl AuthProvider for Secret<String> {
                     password.reveal().as_bytes(),
                     self.reveal().as_bytes(),
                 ) {
-                    Some(Box::new(()))
+                    Some(ValidCredentials::new(()))
                 } else {
                     None
                 }
