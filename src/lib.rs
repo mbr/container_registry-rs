@@ -7,6 +7,7 @@
 //! provider, which will accept any username and password combination as valid:
 //!
 //! ```
+//!# use std::sync::Arc;
 //!# use axum::{extract::DefaultBodyLimit, Router};
 //! use container_registry::auth;
 //! use sec::Secret;
@@ -17,15 +18,17 @@
 //!
 //! // Setup an auth scheme that allows uploading with a master password, read-only
 //! // access otherwise.
-//! let auth = auth::Anonymous::new(auth::Permissions::ReadOnly,
-//!                                 Secret::new("master password".to_owned()));
+//! let auth = Arc::new(auth::Anonymous::new(
+//!     auth::Permissions::ReadOnly,
+//!     Secret::new("master password".to_owned())
+//! ));
 //!
 //! // Instantiate the registry.
-//! let registry = container_registry::ContainerRegistry::new(
-//!     storage.path(),
-//!     Box::new(()),
-//!     std::sync::Arc::new(auth)
-//! ).expect("failed to instantiate registry");
+//! let registry = container_registry::ContainerRegistry::builder()
+//!     .storage(storage.path())  // Note: When testing, use `build_for_testing` instead.
+//!     .auth_provider(auth)
+//!     .build()
+//!     .expect("failed to instantiate registry");
 //!
 //! // Create an axum app router and mount our new registry on it.
 //! let app = Router::new()
@@ -45,6 +48,7 @@ mod www_authenticate;
 use std::{
     fmt::{self, Display},
     io,
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
 };
@@ -54,7 +58,7 @@ use self::{
     storage::{FilesystemStorage, ImageLocation, RegistryStorage},
     types::{ImageManifest, OciError, OciErrors},
 };
-use auth::MissingPermission;
+use auth::{MissingPermission, Permissions};
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -186,28 +190,11 @@ pub struct ContainerRegistry {
 }
 
 impl ContainerRegistry {
-    /// Creates a new instance of the container registry.
+    /// Creates a new builder for a [`ContainerRegistry`].
     ///
-    /// The instance uses the filesystem as the backend to store manifests and blobs, and requires
-    /// an [`AuthProvider`] and [`RegistryHooks`] to provided. Note that it is possible to supply
-    /// `()` for both `hooks` and `auth_provider`.
-    ///
-    /// The current implementation defaults to a filesystem based storage backend at
-    /// `storage_path`. It is conceivable to implement other backends, but currently not supported.
-    pub fn new<P>(
-        storage_path: P,
-        hooks: Box<dyn RegistryHooks>,
-        auth_provider: Arc<dyn AuthProvider>,
-    ) -> Result<Arc<Self>, FilesystemStorageError>
-    where
-        P: AsRef<std::path::Path>,
-    {
-        Ok(Arc::new(ContainerRegistry {
-            realm: "ContainerRegistry".to_string(),
-            auth_provider,
-            storage: Box::new(FilesystemStorage::new(storage_path)?),
-            hooks,
-        }))
+    /// See documentation of [`ContainerRegistryBuilder`] for details.
+    pub fn builder() -> ContainerRegistryBuilder {
+        ContainerRegistryBuilder::default()
     }
 
     /// Builds an [`axum::routing::Router`] for this registry.
@@ -239,6 +226,145 @@ impl ContainerRegistry {
             .with_state(self)
     }
 }
+
+/// Builder for a new instance of the container registry.
+///
+/// Requires a storage to be set, either by calling [`Self::storage`] or constructing using
+/// [`Self::build_for_testing()`], which requires the `test-support` feature and will use
+/// a temporary directory.
+///
+/// By default, no hooks are set up and the auth provider requires authentication, but does not
+/// grant access to anything.
+#[derive(Default)]
+pub struct ContainerRegistryBuilder {
+    /// Storage to use.
+    storage: Option<PathBuf>,
+    /// Hooks to use.
+    hooks: Option<Box<dyn RegistryHooks>>,
+    /// Auth provider to use.
+    auth_provider: Option<Arc<dyn AuthProvider>>,
+}
+
+impl ContainerRegistryBuilder {
+    /// Sets the auth provider for the new registry.
+    pub fn auth_provider(mut self, auth_provider: Arc<dyn AuthProvider>) -> Self {
+        self.auth_provider = Some(auth_provider);
+        self
+    }
+
+    /// Sets hooks for the new registry to call.
+    pub fn hooks(mut self, hooks: Box<dyn RegistryHooks>) -> Self {
+        self.hooks = Some(hooks);
+        self
+    }
+
+    /// Set the storage path for the new registry.
+    pub fn storage<P>(mut self, storage: P) -> Self
+    where
+        P: Into<PathBuf>,
+    {
+        self.storage = Some(storage.into());
+        self
+    }
+
+    /// Constructs a new registry.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if not storage has been set through [`Self::storage`].
+    pub fn build(mut self) -> Result<Arc<ContainerRegistry>, FilesystemStorageError> {
+        let storage_path = self
+            .storage
+            .expect("attempted to construct registry with no storage path");
+        let storage = Box::new(FilesystemStorage::new(storage_path)?);
+        let auth_provider = self
+            .auth_provider
+            .take()
+            .unwrap_or_else(|| Arc::new(Permissions::NoAccess));
+        let hooks = self.hooks.take().unwrap_or_else(|| Box::new(()));
+        Ok(Arc::new(ContainerRegistry {
+            realm: "ContainerRegistry".to_string(),
+            auth_provider,
+            storage,
+            hooks,
+        }))
+    }
+}
+
+#[cfg(any(feature = "test-support", test))]
+mod test_support {
+    use std::sync::Arc;
+
+    use axum::{body::Body, routing::RouterIntoService};
+    use tower_http::trace::TraceLayer;
+
+    use super::{
+        auth::{self, Permissions},
+        ContainerRegistry, ContainerRegistryBuilder,
+    };
+
+    /// A handle to a container registry instantiated for testing.
+
+    pub struct TestingContainerRegistry {
+        /// Reference to the registry instance.
+        pub registry: Arc<ContainerRegistry>,
+        /// Storage used by the registry.
+        pub temp_storage: Option<tempdir::TempDir>,
+    }
+
+    impl TestingContainerRegistry {
+        /// Creates an `axum` service for the registry.
+        pub fn make_service(&self) -> RouterIntoService<Body> {
+            self.registry
+                .clone()
+                .make_router()
+                .layer(TraceLayer::new_for_http())
+                .into_service::<Body>()
+        }
+    }
+
+    impl ContainerRegistryBuilder {
+        /// Constructs a new registry for testing purposes.
+        ///
+        /// Similar to [`Self::build`], except
+        ///
+        /// * If no auth provider has been set, a default one granting **full write access** to any
+        ///   user, including anonymous ones.
+        /// * If no storage path has been set, creates a temporary directory for the registry, which
+        ///   will be cleaned up if `TestingContainerRegistry` is dropped.
+        ///
+        /// # Panics
+        ///
+        /// Will panic if filesystem operations when setting up storage fail.
+        pub fn build_for_testing(mut self) -> TestingContainerRegistry {
+            let temp_storage = if self.storage.is_none() {
+                let temp_storage = tempdir::TempDir::new("container-registry-for-testing").expect(
+                "could not create temporary directory to host testing container registry instance",
+            );
+                self = self.storage(temp_storage.path());
+                Some(temp_storage)
+            } else {
+                None
+            };
+
+            if self.auth_provider.is_none() {
+                self = self.auth_provider(Arc::new(auth::Anonymous::new(
+                    Permissions::ReadWrite,
+                    Permissions::ReadWrite,
+                )));
+            }
+
+            let registry = self.build().expect("could not create registry");
+
+            TestingContainerRegistry {
+                registry,
+                temp_storage,
+            }
+        }
+    }
+}
+#[cfg(any(feature = "test-support", test))]
+pub use test_support::*;
 
 /// Registry index
 ///
@@ -692,98 +818,46 @@ mod tests {
             header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, LOCATION},
             Request, StatusCode,
         },
-        routing::RouterIntoService,
     };
     use base64::Engine;
     use http_body_util::BodyExt;
     use sec::Secret;
-    use tempdir::TempDir;
     use tokio::io::AsyncWriteExt;
     use tower::{util::ServiceExt, Service};
-    use tower_http::trace::TraceLayer;
 
     use crate::{
-        auth::{Anonymous, Permissions},
         storage::{ImageLocation, ManifestReference, Reference},
-        ImageDigest,
+        ImageDigest, TestingContainerRegistry,
     };
 
     use super::{storage::Digest, ContainerRegistry};
 
-    struct Context {
-        _tmp: TempDir,
-        password: String,
-        registry: Arc<ContainerRegistry>,
+    /// Constructs a basic auth header with the [`TEST_PASSWORD`].
+    fn basic_auth() -> String {
+        let encoded =
+            base64::prelude::BASE64_STANDARD.encode(format!("user:{}", TEST_PASSWORD).as_bytes());
+        format!("Basic {}", encoded)
     }
 
-    impl Context {
-        fn basic_auth(&self) -> String {
-            let encoded = base64::prelude::BASE64_STANDARD
-                .encode(format!("user:{}", self.password).as_bytes());
-            format!("Basic {}", encoded)
-        }
-
-        fn invalid_basic_auth(&self) -> String {
-            let not_the_password = "user:not-the-password".to_owned() + self.password.as_str();
-            let encoded = base64::prelude::BASE64_STANDARD.encode(not_the_password.as_bytes());
-            format!("Basic {}", encoded)
-        }
+    /// Constructs a basic auth header that is guaranteed to NOT be the [`TEST_PASSWORD`].
+    fn invalid_basic_auth() -> String {
+        let not_the_password = "user:not-the-password".to_owned() + TEST_PASSWORD;
+        let encoded = base64::prelude::BASE64_STANDARD.encode(not_the_password.as_bytes());
+        format!("Basic {}", encoded)
     }
 
-    fn mk_test_app() -> (Context, RouterIntoService<Body>) {
-        let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
+    const TEST_PASSWORD: &str = "random-test-password";
 
-        let password = "random-test-password".to_owned();
-        let master_key = Arc::new(Secret::new(password.clone()));
-
-        let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), master_key)
-            .expect("should not fail to create app");
-        let router = registry
-            .clone()
-            .make_router()
-            .layer(TraceLayer::new_for_http());
-
-        let service = router.into_service::<Body>();
-
-        (
-            Context {
-                registry,
-                _tmp: tmp,
-                password,
-            },
-            service,
-        )
-    }
-
-    fn mk_anon_app() -> (Context, RouterIntoService<Body>) {
-        let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
-
-        let auth = Arc::new(Anonymous::new(
-            Permissions::ReadWrite,
-            Permissions::ReadWrite,
-        ));
-        let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), auth)
-            .expect("should not fail to create app");
-        let router = registry
-            .clone()
-            .make_router()
-            .layer(TraceLayer::new_for_http());
-
-        let service = router.into_service::<Body>();
-
-        (
-            Context {
-                registry,
-                _tmp: tmp,
-                password: "NOTSET".to_string(),
-            },
-            service,
-        )
+    fn registry_with_test_password() -> TestingContainerRegistry {
+        ContainerRegistry::builder()
+            .auth_provider(Arc::new(Secret::new(TEST_PASSWORD.to_owned())))
+            .build_for_testing()
     }
 
     #[tokio::test]
     async fn refuses_access_without_valid_credentials() {
-        let (ctx, mut service) = mk_test_app();
+        let ctx = registry_with_test_password();
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         let targets = [("GET", "/v2/")];
@@ -809,7 +883,7 @@ mod tests {
                     Request::builder()
                         .method(method)
                         .uri(endpoint)
-                        .header(AUTHORIZATION, ctx.invalid_basic_auth())
+                        .header(AUTHORIZATION, invalid_basic_auth())
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -822,7 +896,7 @@ mod tests {
                 .call(
                     Request::builder()
                         .uri("/v2/")
-                        .header(AUTHORIZATION, ctx.basic_auth())
+                        .header(AUTHORIZATION, basic_auth())
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -855,7 +929,8 @@ mod tests {
     #[tokio::test]
     async fn chunked_upload() {
         // See https://github.com/opencontainers/distribution-spec/blob/v1.0.1/spec.md#pushing-a-blob-in-chunks
-        let (ctx, mut service) = mk_test_app();
+        let ctx = registry_with_test_password();
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         // Step 1: POST for new blob upload.
@@ -863,7 +938,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("POST")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri("/v2/tests/sample/blobs/uploads/")
                     .body(Body::empty())
                     .unwrap(),
@@ -892,7 +967,7 @@ mod tests {
                 .call(
                     Request::builder()
                         .method("PATCH")
-                        .header(AUTHORIZATION, ctx.basic_auth())
+                        .header(AUTHORIZATION, basic_auth())
                         .header(CONTENT_LENGTH, chunk.len())
                         .header(CONTENT_RANGE, range)
                         .uri(&put_location)
@@ -910,7 +985,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("PUT")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(put_location + "?digest=" + IMAGE_DIGEST.to_string().as_str())
                     .body(Body::empty())
                     .unwrap(),
@@ -934,7 +1009,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("HEAD")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(blob_location)
                     .body(Body::empty())
                     .unwrap(),
@@ -960,7 +1035,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("PUT")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(manifest_by_tag_location)
                     .body(Body::from(RAW_MANIFEST))
                     .unwrap(),
@@ -1010,7 +1085,9 @@ mod tests {
     /// Similar to `chunked_upload`, but uses no credentials to log in.
     #[tokio::test]
     async fn anonymous_upload() {
-        let (ctx, mut service) = mk_anon_app();
+        let ctx = ContainerRegistry::builder().build_for_testing();
+
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         // Step 1: POST for new blob upload.
@@ -1132,7 +1209,8 @@ mod tests {
 
     #[tokio::test]
     async fn image_download() {
-        let (ctx, mut service) = mk_test_app();
+        let ctx = registry_with_test_password();
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         let manifest_ref_by_tag = ManifestReference::new(
@@ -1178,7 +1256,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("GET")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(manifest_by_tag_location)
                     .body(Body::empty())
                     .unwrap(),
@@ -1194,7 +1272,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("GET")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(manifest_by_digest_location)
                     .body(Body::empty())
                     .unwrap(),
@@ -1211,7 +1289,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method("GET")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri(format!("/v2/testing/sample/blobs/{}", IMAGE_DIGEST))
                     .body(Body::empty())
                     .unwrap(),
@@ -1226,14 +1304,15 @@ mod tests {
 
     #[tokio::test]
     async fn missing_manifest_returns_404() {
-        let (ctx, mut service) = mk_test_app();
+        let ctx = registry_with_test_password();
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         let response = app
             .call(
                 Request::builder()
                     .method("GET")
-                    .header(AUTHORIZATION, ctx.basic_auth())
+                    .header(AUTHORIZATION, basic_auth())
                     .uri("/v2/doesnot/exist/manifests/latest")
                     .body(Body::empty())
                     .unwrap(),

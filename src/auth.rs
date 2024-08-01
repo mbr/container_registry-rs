@@ -97,12 +97,12 @@ pub struct ValidCredentials(pub Box<dyn Any + Send + Sync>);
 impl ValidCredentials {
     /// Creates a new set of valid credentials.
     #[inline(always)]
-    fn new<T: Send + Sync + 'static>(inner: T) -> Self {
+    pub fn new<T: Send + Sync + 'static>(inner: T) -> Self {
         ValidCredentials(Box::new(inner))
     }
 
     /// Extracts a reference to the contained inner type.
-    fn extract_ref<T: 'static>(&self) -> &T {
+    pub fn extract_ref<T: 'static>(&self) -> &T {
         self.0.downcast_ref::<T>().expect("could not downcast `ValidCredentials` into expected type - was auth provider called with the wrong set of credentials?")
     }
 }
@@ -268,14 +268,14 @@ where
         creds: &ValidCredentials,
         image: &ImageLocation,
     ) -> Permissions {
-        match dbg!(creds.extract_ref::<AnonCreds>()) {
+        match creds.extract_ref::<AnonCreds>() {
             AnonCreds::Anonymous => self.anon_permissions,
             _other => self.inner.image_permissions(creds, image).await,
         }
     }
 
     async fn blob_permissions(&self, creds: &ValidCredentials, blob: &ImageDigest) -> Permissions {
-        match dbg!(creds.extract_ref::<AnonCreds>()) {
+        match creds.extract_ref::<AnonCreds>() {
             AnonCreds::Anonymous => self.anon_permissions,
             _other => self.inner.blob_permissions(creds, blob).await,
         }
