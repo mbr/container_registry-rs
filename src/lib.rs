@@ -248,13 +248,13 @@ pub struct ContainerRegistryBuilder {
 impl ContainerRegistryBuilder {
     /// Sets the auth provider for the new registry.
     pub fn auth_provider(mut self, auth_provider: Arc<dyn AuthProvider>) -> Self {
-        self.auth_provider = Some(auth_provider.into());
+        self.auth_provider = Some(auth_provider);
         self
     }
 
     /// Sets hooks for the new registry to call.
     pub fn hooks(mut self, hooks: Box<dyn RegistryHooks>) -> Self {
-        self.hooks = Some(hooks.into());
+        self.hooks = Some(hooks);
         self
     }
 
@@ -849,11 +849,9 @@ mod tests {
     const TEST_PASSWORD: &str = "random-test-password";
 
     fn registry_with_test_password() -> TestingContainerRegistry {
-        let ctx = ContainerRegistry::builder()
+        ContainerRegistry::builder()
             .auth_provider(Arc::new(Secret::new(TEST_PASSWORD.to_owned())))
-            .build_for_testing();
-
-        ctx
+            .build_for_testing()
     }
 
     #[tokio::test]
