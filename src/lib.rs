@@ -289,57 +289,68 @@ impl ContainerRegistryBuilder {
             hooks,
         }))
     }
+}
 
-    /// Constructs a new registry for testing purposes.
-    ///
-    /// Similar to [`Self::build`], except
-    ///
-    /// * If no auth provider has been set, a default one granting **full write access** to any
-    ///   user, including anonymous ones.
-    /// * If no storage path has been set, creates a temporary directory for the registry, which
-    ///   will be cleaned up if `TestingContainerRegistry` is dropped.
-    ///
-    /// # Panics
-    ///
-    /// Will panic if filesystem operations when setting up storage fail.
-    #[cfg(feature = "test-support")]
-    pub fn build_for_testing(mut self) -> TestingContainerRegistry {
-        let temp_storage = if self.storage.is_none() {
-            let temp_storage = tempdir::TempDir::new("container-registry-for-testing").expect(
+#[cfg(any(feature = "test-support", test))]
+mod test_support {
+    use std::sync::Arc;
+
+    use super::{auth, ContainerRegistry, ContainerRegistryBuilder};
+
+    /// A handle to a container registry instantiated for testing.
+
+    pub struct TestingContainerRegistry {
+        /// Reference to the registry instance.
+        pub registry: Arc<ContainerRegistry>,
+        /// Storage used by the registry.
+        pub temp_storage: Option<tempdir::TempDir>,
+    }
+
+    impl ContainerRegistryBuilder {
+        /// Constructs a new registry for testing purposes.
+        ///
+        /// Similar to [`Self::build`], except
+        ///
+        /// * If no auth provider has been set, a default one granting **full write access** to any
+        ///   user, including anonymous ones.
+        /// * If no storage path has been set, creates a temporary directory for the registry, which
+        ///   will be cleaned up if `TestingContainerRegistry` is dropped.
+        ///
+        /// # Panics
+        ///
+        /// Will panic if filesystem operations when setting up storage fail.
+        #[cfg(any(feature = "test-support", test))]
+        pub fn build_for_testing(mut self) -> TestingContainerRegistry {
+            use crate::auth::{self, Permissions};
+
+            let temp_storage = if self.storage.is_none() {
+                let temp_storage = tempdir::TempDir::new("container-registry-for-testing").expect(
                 "could not create temporary directory to host testing container registry instance",
             );
-            self = self.storage(temp_storage.path());
-            Some(temp_storage)
-        } else {
-            None
-        };
+                self = self.storage(temp_storage.path());
+                Some(temp_storage)
+            } else {
+                None
+            };
 
-        if self.auth_provider.is_none() {
-            self = self.auth_provider(Arc::new(auth::Anonymous::new(
-                Permissions::ReadWrite,
-                Permissions::ReadWrite,
-            )));
-        }
+            if self.auth_provider.is_none() {
+                self = self.auth_provider(Arc::new(auth::Anonymous::new(
+                    Permissions::ReadWrite,
+                    Permissions::ReadWrite,
+                )));
+            }
 
-        let registry = self.build().expect("could not create registry");
+            let registry = self.build().expect("could not create registry");
 
-        TestingContainerRegistry {
-            registry,
-            temp_storage,
+            TestingContainerRegistry {
+                registry,
+                temp_storage,
+            }
         }
     }
 }
-
-/// A handle to a container registry instantiated for testing.
-#[cfg(feature = "test-support")]
-pub struct TestingContainerRegistry {
-    /// Reference to the registry instance.
-    pub registry: Arc<ContainerRegistry>,
-    /// Storage used by the registry.
-    pub temp_storage: Option<tempdir::TempDir>,
-}
-
-// TODO: Send/Sync?
+#[cfg(any(feature = "test-support", test))]
+pub use test_support::*;
 
 /// Registry index
 ///
