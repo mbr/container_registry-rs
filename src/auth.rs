@@ -27,8 +27,9 @@ use axum::{
     },
 };
 use sec::Secret;
+use thiserror::Error;
 
-use crate::storage::ImageLocation;
+use crate::{storage::ImageLocation, ImageDigest};
 
 use super::{
     www_authenticate::{self},
@@ -47,6 +48,14 @@ pub enum Unverified {
     },
     /// No credentials were given.
     NoCredentials,
+}
+
+impl Unverified {
+    /// Returns whether or not this set of unverified credentials is actually no credentials at all.
+    #[inline(always)]
+    pub fn is_no_credentials(&self) -> bool {
+        matches!(self, Unverified::NoCredentials)
+    }
 }
 
 #[async_trait]
@@ -122,7 +131,8 @@ pub enum Permissions {
 impl Permissions {
     /// Returns whether or not permissions include read access.
     #[inline(always)]
-    pub fn permit_read(self) -> bool {
+    #[must_use = "should not check read permissions and discard the result"]
+    pub fn has_read_permission(self) -> bool {
         match self {
             Permissions::NoAccess | Permissions::WriteOnly => false,
             Permissions::Read | Permissions::ReadWrite => true,
@@ -131,13 +141,39 @@ impl Permissions {
 
     /// Returns whether or not permissions include write access.
     #[inline(always)]
-    pub fn permit_write(self) -> bool {
+    #[must_use = "should not check write permissions and discard the result"]
+    pub fn has_write_permission(self) -> bool {
         match self {
             Permissions::NoAccess | Permissions::Read => false,
             Permissions::WriteOnly | Permissions::ReadWrite => true,
         }
     }
+
+    /// Returns an error if no read permission is included.
+    #[inline(always)]
+    pub fn require_read(self) -> Result<(), MissingPermission> {
+        if !self.has_read_permission() {
+            Err(MissingPermission)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Returns an error if no write permission is included.
+    #[inline(always)]
+    pub fn require_write(self) -> Result<(), MissingPermission> {
+        if !self.has_write_permission() {
+            Err(MissingPermission)
+        } else {
+            Ok(())
+        }
+    }
 }
+
+/// Error indicating a missing permission.
+#[derive(Debug, Error)]
+#[error("not permitted")]
+pub struct MissingPermission;
 
 /// An authentication and authorization provider.
 ///
@@ -157,8 +193,21 @@ pub trait AuthProvider: Send + Sync {
     ///
     /// This is an **authorizing** function that determines permissions for previously authenticated
     /// credentials on a given [`ImageLocation`].
-    async fn get_permissions(&self, creds: &ValidCredentials, image: &ImageLocation)
-        -> Permissions;
+    async fn image_permissions(
+        &self,
+        creds: &ValidCredentials,
+        image: &ImageLocation,
+    ) -> Permissions;
+
+    /// Determine permissions for given credentials to a specific blob.
+    ///
+    /// This is an **authorizing** function that determines permissions for previously authenticated
+    /// credentials on a given [`ImageLocation`].
+    ///
+    /// Note that blob permissions are only ever queried for reading blobs. Writing blobs does not
+    /// involve the uploader sending a hash beforehand, thus this function cannot be used to
+    /// implement a blacklist for specific blobs.
+    async fn blob_permissions(&self, creds: &ValidCredentials, blob: &ImageDigest) -> Permissions;
 }
 
 #[async_trait]
@@ -173,10 +222,19 @@ impl AuthProvider for bool {
     }
 
     #[inline(always)]
-    async fn get_permissions(
+    async fn image_permissions(
         &self,
         _creds: &ValidCredentials,
         _image: &ImageLocation,
+    ) -> Permissions {
+        Permissions::ReadWrite
+    }
+
+    #[inline(always)]
+    async fn blob_permissions(
+        &self,
+        _creds: &ValidCredentials,
+        _blob: &ImageDigest,
     ) -> Permissions {
         Permissions::ReadWrite
     }
@@ -206,10 +264,19 @@ impl AuthProvider for HashMap<String, Secret<String>> {
     }
 
     #[inline(always)]
-    async fn get_permissions(
+    async fn image_permissions(
         &self,
         _creds: &ValidCredentials,
         _image: &ImageLocation,
+    ) -> Permissions {
+        Permissions::ReadWrite
+    }
+
+    #[inline(always)]
+    async fn blob_permissions(
+        &self,
+        _creds: &ValidCredentials,
+        _blob: &ImageDigest,
     ) -> Permissions {
         Permissions::ReadWrite
     }
@@ -226,10 +293,19 @@ where
     }
 
     #[inline(always)]
-    async fn get_permissions(
+    async fn image_permissions(
         &self,
         _creds: &ValidCredentials,
         _image: &ImageLocation,
+    ) -> Permissions {
+        Permissions::ReadWrite
+    }
+
+    #[inline(always)]
+    async fn blob_permissions(
+        &self,
+        _creds: &ValidCredentials,
+        _blob: &ImageDigest,
     ) -> Permissions {
         Permissions::ReadWrite
     }
@@ -246,10 +322,19 @@ where
     }
 
     #[inline(always)]
-    async fn get_permissions(
+    async fn image_permissions(
         &self,
         _creds: &ValidCredentials,
         _image: &ImageLocation,
+    ) -> Permissions {
+        Permissions::ReadWrite
+    }
+
+    #[inline(always)]
+    async fn blob_permissions(
+        &self,
+        _creds: &ValidCredentials,
+        _blob: &ImageDigest,
     ) -> Permissions {
         Permissions::ReadWrite
     }
@@ -278,10 +363,19 @@ impl AuthProvider for Secret<String> {
     }
 
     #[inline(always)]
-    async fn get_permissions(
+    async fn image_permissions(
         &self,
         _creds: &ValidCredentials,
         _image: &ImageLocation,
+    ) -> Permissions {
+        Permissions::ReadWrite
+    }
+
+    #[inline(always)]
+    async fn blob_permissions(
+        &self,
+        _creds: &ValidCredentials,
+        _blob: &ImageDigest,
     ) -> Permissions {
         Permissions::ReadWrite
     }

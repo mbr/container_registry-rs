@@ -46,6 +46,7 @@ use self::{
     storage::{FilesystemStorage, ImageLocation, RegistryStorage},
     types::{ImageManifest, OciError, OciErrors},
 };
+use auth::MissingPermission;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -82,6 +83,9 @@ pub enum RegistryError {
     /// A requested item (eg. manifest, blob, etc.) was not found.
     #[error("missing item")]
     NotFound,
+    /// Access to a resource was denied.
+    #[error("permission denied")]
+    PermissionDenied(#[from] MissingPermission),
     /// Error in storage backend.
     #[error(transparent)]
     // TODO: Remove `from` impl.
@@ -115,6 +119,12 @@ impl IntoResponse for RegistryError {
             RegistryError::NotFound => (
                 StatusCode::NOT_FOUND,
                 OciErrors::single(OciError::new(types::ErrorCode::BlobUnknown)),
+            )
+                .into_response(),
+            RegistryError::PermissionDenied(_) => (
+                StatusCode::FORBIDDEN,
+                // TODO: Should this be a proper OCI error?
+                "access to request resource was denied",
             )
                 .into_response(),
             RegistryError::Storage(err) => err.into_response(),
@@ -228,23 +238,23 @@ impl ContainerRegistry {
 /// UNAUTHORIZED.
 async fn index_v2(
     State(registry): State<Arc<ContainerRegistry>>,
-    credentials: Option<Unverified>,
+    unverified: Unverified,
 ) -> Response<Body> {
     let realm = &registry.realm;
 
-    if let Some(creds) = credentials {
-        if registry
+    // TODO: This code duplicates some of the extraction logic of `Unverified` -- and how does it work for anonymous access?
+    if !unverified.is_no_credentials()
+        && registry
             .auth_provider
-            .check_credentials(&creds)
+            .check_credentials(&unverified)
             .await
             .is_some()
-        {
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header("WWW-Authenticate", format!("Basic realm=\"{realm}\""))
-                .body(Body::empty())
-                .unwrap();
-        }
+    {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("WWW-Authenticate", format!("Basic realm=\"{realm}\""))
+            .body(Body::empty())
+            .unwrap();
     }
 
     // Return `UNAUTHORIZED`, since we want the client to supply credentials.
@@ -259,8 +269,14 @@ async fn index_v2(
 async fn blob_check(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
-    _auth: ValidCredentials,
+    creds: ValidCredentials,
 ) -> Result<Response, RegistryError> {
+    registry
+        .auth_provider
+        .blob_permissions(&creds, &image)
+        .await
+        .require_read()?;
+
     if let Some(metadata) = registry.storage.get_blob_metadata(image.digest).await? {
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -281,8 +297,14 @@ async fn blob_check(
 async fn blob_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
-    _auth: ValidCredentials,
+    creds: ValidCredentials,
 ) -> Result<Response, RegistryError> {
+    registry
+        .auth_provider
+        .blob_permissions(&creds, &image)
+        .await
+        .require_read()?;
+
     // TODO: Get size for `Content-length` header.
 
     let reader = registry
@@ -304,8 +326,14 @@ async fn blob_get(
 async fn upload_new(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
-    _auth: ValidCredentials,
+    creds: ValidCredentials,
 ) -> Result<UploadState, RegistryError> {
+    registry
+        .auth_provider
+        .image_permissions(&creds, &location)
+        .await
+        .require_write()?;
+
     // Initiate a new upload
     let upload = registry.storage.begin_new_upload().await?;
 
@@ -380,7 +408,7 @@ struct UploadId {
 /// An image hash.
 ///
 /// Currently only SHA256 hashes are supported.
-struct ImageDigest {
+pub struct ImageDigest {
     /// The actual image digest.
     digest: storage::Digest,
 }
@@ -412,11 +440,16 @@ impl ImageDigest {
     pub const fn new(digest: storage::Digest) -> Self {
         Self { digest }
     }
+
+    /// Returns the actual digest.
+    pub fn digest(&self) -> storage::Digest {
+        self.digest
+    }
 }
 
 /// Error parsing a specific image digest.
 #[derive(Debug, Error)]
-enum ImageDigestParseError {
+pub enum ImageDigestParseError {
     /// The given digest was of the wrong length.
     #[error("wrong length")]
     WrongLength,
@@ -467,9 +500,15 @@ async fn upload_add_chunk(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
     Path(UploadId { upload }): Path<UploadId>,
-    _auth: ValidCredentials,
+    creds: ValidCredentials,
     request: axum::extract::Request,
 ) -> Result<UploadState, RegistryError> {
+    registry
+        .auth_provider
+        .image_permissions(&creds, &location)
+        .await
+        .require_write()?;
+
     // Check if we have a range - if so, its an unsupported feature, namely monolith uploads.
     if request.headers().contains_key(RANGE) {
         return Err(RegistryError::NotSupported(
@@ -518,10 +557,17 @@ async fn upload_finalize(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((repository, image, upload)): Path<(String, String, Uuid)>,
     Query(DigestQuery { digest }): Query<DigestQuery>,
-    _auth: ValidCredentials,
+    creds: ValidCredentials,
     request: axum::extract::Request,
 ) -> Result<Response<Body>, RegistryError> {
     let location = ImageLocation::new(repository, image);
+
+    registry
+        .auth_provider
+        .image_permissions(&creds, &location)
+        .await
+        .require_write()?;
+
     // We do not support the final chunk in the `PUT` call, so ensure that's not the case.
     match request.headers().get(CONTENT_LENGTH) {
         Some(value) => {
@@ -560,9 +606,15 @@ async fn upload_finalize(
 async fn manifest_put(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
-    _auth: ValidCredentials,
+    creds: ValidCredentials,
     image_manifest_json: String,
 ) -> Result<Response<Body>, RegistryError> {
+    registry
+        .auth_provider
+        .image_permissions(&creds, manifest_reference.location())
+        .await
+        .require_write()?;
+
     let digest = registry
         .storage
         .put_manifest(&manifest_reference, image_manifest_json.as_bytes())
@@ -597,8 +649,14 @@ async fn manifest_put(
 async fn manifest_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
-    _auth: ValidCredentials,
+    creds: ValidCredentials,
 ) -> Result<Response<Body>, RegistryError> {
+    registry
+        .auth_provider
+        .image_permissions(&creds, manifest_reference.location())
+        .await
+        .require_read()?;
+
     let manifest_json = registry
         .storage
         .get_manifest(&manifest_reference)
