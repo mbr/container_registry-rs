@@ -68,7 +68,7 @@ use tracing::info;
 use uuid::Uuid;
 
 pub(crate) use {
-    auth::{AuthProvider, UnverifiedCredentials},
+    auth::{AuthProvider, Unverified},
     hooks::RegistryHooks,
     storage::{FilesystemStorageError, ManifestReference},
 };
@@ -228,7 +228,7 @@ impl ContainerRegistry {
 /// UNAUTHORIZED.
 async fn index_v2(
     State(registry): State<Arc<ContainerRegistry>>,
-    credentials: Option<UnverifiedCredentials>,
+    credentials: Option<Unverified>,
 ) -> Response<Body> {
     let realm = &registry.realm;
 

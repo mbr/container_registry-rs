@@ -32,7 +32,7 @@ use super::{
 
 /// A set of credentials supplied that has not been verified.
 #[derive(Debug)]
-pub enum UnverifiedCredentials {
+pub enum Unverified {
     /// A set of username and password credentials.
     UsernameAndPassword {
         /// The given username.
@@ -45,7 +45,7 @@ pub enum UnverifiedCredentials {
 }
 
 #[async_trait]
-impl<S> FromRequestParts<S> for UnverifiedCredentials {
+impl<S> FromRequestParts<S> for Unverified {
     type Rejection = StatusCode;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
@@ -53,7 +53,7 @@ impl<S> FromRequestParts<S> for UnverifiedCredentials {
             let (_unparsed, basic) = www_authenticate::basic_auth_response(auth_header.as_bytes())
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-            Ok(UnverifiedCredentials::UsernameAndPassword {
+            Ok(Unverified::UsernameAndPassword {
                 username: str::from_utf8(&basic.username)
                     .map_err(|_| StatusCode::BAD_REQUEST)?
                     .to_owned(),
@@ -64,7 +64,7 @@ impl<S> FromRequestParts<S> for UnverifiedCredentials {
                 ),
             })
         } else {
-            Ok(UnverifiedCredentials::NoCredentials)
+            Ok(Unverified::NoCredentials)
         }
     }
 }
@@ -88,7 +88,7 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidCredentials {
         parts: &mut Parts,
         state: &Arc<ContainerRegistry>,
     ) -> Result<Self, Self::Rejection> {
-        let unverified = UnverifiedCredentials::from_request_parts(parts, state).await?;
+        let unverified = Unverified::from_request_parts(parts, state).await?;
 
         // We got a set of credentials, now verify.
         match state.auth_provider.check_credentials(&unverified).await {
@@ -107,12 +107,12 @@ pub trait AuthProvider: Send + Sync {
     ///
     /// Must return `None` if the credentials are not valid at all, or may return any set of
     /// provider specific credentials (e.g. a username or ID) if they are valid.
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<ValidCredentials>;
+    async fn check_credentials(&self, unverified: &Unverified) -> Option<ValidCredentials>;
 }
 
 #[async_trait]
 impl AuthProvider for bool {
-    async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> Option<ValidCredentials> {
+    async fn check_credentials(&self, _unverified: &Unverified) -> Option<ValidCredentials> {
         if *self {
             Some(ValidCredentials::new(()))
         } else {
@@ -123,12 +123,9 @@ impl AuthProvider for bool {
 
 #[async_trait]
 impl AuthProvider for HashMap<String, Secret<String>> {
-    async fn check_credentials(
-        &self,
-        unverified: &UnverifiedCredentials,
-    ) -> Option<ValidCredentials> {
+    async fn check_credentials(&self, unverified: &Unverified) -> Option<ValidCredentials> {
         match unverified {
-            UnverifiedCredentials::UsernameAndPassword {
+            Unverified::UsernameAndPassword {
                 username: unverified_username,
                 password: unverified_password,
             } => {
@@ -143,7 +140,7 @@ impl AuthProvider for HashMap<String, Secret<String>> {
 
                 None
             }
-            UnverifiedCredentials::NoCredentials => None,
+            Unverified::NoCredentials => None,
         }
     }
 }
@@ -154,7 +151,7 @@ where
     T: AuthProvider,
 {
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<ValidCredentials> {
+    async fn check_credentials(&self, unverified: &Unverified) -> Option<ValidCredentials> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
@@ -165,7 +162,7 @@ where
     T: AuthProvider,
 {
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<ValidCredentials> {
+    async fn check_credentials(&self, unverified: &Unverified) -> Option<ValidCredentials> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
@@ -173,9 +170,9 @@ where
 #[async_trait]
 impl AuthProvider for Secret<String> {
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<ValidCredentials> {
+    async fn check_credentials(&self, unverified: &Unverified) -> Option<ValidCredentials> {
         match creds {
-            UnverifiedCredentials::UsernameAndPassword {
+            Unverified::UsernameAndPassword {
                 username: _,
                 password,
             } => {
@@ -188,7 +185,7 @@ impl AuthProvider for Secret<String> {
                     None
                 }
             }
-            UnverifiedCredentials::NoCredentials => None,
+            Unverified::NoCredentials => None,
         }
     }
 }
