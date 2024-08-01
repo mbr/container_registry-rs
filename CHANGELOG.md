@@ -11,6 +11,10 @@
 
 * The `AuthProvider` API has changed to also include permissions.
 
+### Removed
+
+* The `AuthProvider` implementation of `bool` has been removed, use `Permissions::ReadWrite` as a replacement.
+
 ## [0.1.2] - 2024-07-29
 
 ### Fixed

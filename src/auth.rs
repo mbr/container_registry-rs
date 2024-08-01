@@ -4,8 +4,8 @@
 //! [`AuthProvider`] trait can be used as an authentication (and authorization) backend. Included
 //! are implementations for the following types:
 //!
-//! * `bool`: A simple always deny (`false`) / always allow (`true`) backend, mainly used in tests
-//!           and example code. Will not accept missing credentials.
+//! * `Permissions`: The [`Permissions`] type itself is an auth provider, it will allow
+//!                  access with the given permissions to any non-anonymous client.
 //! * `HashMap<String, Secret<String>>`: A mapping of usernames to (unencrypted) passwords.
 //! * `Secret<String>`: Master password, ignores all usernames and just compares the password.
 //! * `Anonymous`: A decorator that wraps around another [`AuthProvider`], will grant a fixed set
@@ -135,7 +135,7 @@ pub enum Permissions {
     /// Write only access.
     WriteOnly = 2,
     /// Read access.
-    Read = 4,
+    ReadOnly = 4,
     /// Read and write access.
     ReadWrite = 6,
 }
@@ -147,7 +147,7 @@ impl Permissions {
     pub fn has_read_permission(self) -> bool {
         match self {
             Permissions::NoAccess | Permissions::WriteOnly => false,
-            Permissions::Read | Permissions::ReadWrite => true,
+            Permissions::ReadOnly | Permissions::ReadWrite => true,
         }
     }
 
@@ -156,7 +156,7 @@ impl Permissions {
     #[must_use = "should not check write permissions and discard the result"]
     pub fn has_write_permission(self) -> bool {
         match self {
-            Permissions::NoAccess | Permissions::Read => false,
+            Permissions::NoAccess | Permissions::ReadOnly => false,
             Permissions::WriteOnly | Permissions::ReadWrite => true,
         }
     }
@@ -283,13 +283,12 @@ where
 }
 
 #[async_trait]
-impl AuthProvider for bool {
+impl AuthProvider for Permissions {
     #[inline(always)]
-    async fn check_credentials(&self, _unverified: &Unverified) -> Option<ValidCredentials> {
-        if *self {
-            Some(ValidCredentials::new(()))
-        } else {
-            None
+    async fn check_credentials(&self, unverified: &Unverified) -> Option<ValidCredentials> {
+        match unverified {
+            Unverified::NoCredentials => None,
+            _other => Some(ValidCredentials::new(())),
         }
     }
 
@@ -299,7 +298,7 @@ impl AuthProvider for bool {
         _creds: &ValidCredentials,
         _image: &ImageLocation,
     ) -> Permissions {
-        Permissions::ReadWrite
+        *self
     }
 
     #[inline(always)]
@@ -308,7 +307,7 @@ impl AuthProvider for bool {
         _creds: &ValidCredentials,
         _blob: &ImageDigest,
     ) -> Permissions {
-        Permissions::ReadWrite
+        *self
     }
 }
 

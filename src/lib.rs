@@ -8,15 +8,23 @@
 //!
 //! ```
 //!# use axum::{extract::DefaultBodyLimit, Router};
+//! use container_registry::auth;
+//! use sec::Secret;
+//!
 //! // The registry requires an existing (empty) directory, which it will initialize.
 //! let storage = tempdir::TempDir::new("container_registry_test")
 //!     .expect("could not create storage dir");
+//!
+//! // Setup an auth scheme that allows uploading with a master password, read-only
+//! // access otherwise.
+//! let auth = auth::Anonymous::new(auth::Permissions::ReadOnly,
+//!                                 Secret::new("master password".to_owned()));
 //!
 //! // Instantiate the registry.
 //! let registry = container_registry::ContainerRegistry::new(
 //!     storage.path(),
 //!     Box::new(()),
-//!     std::sync::Arc::new(true)
+//!     std::sync::Arc::new(auth)
 //! ).expect("failed to instantiate registry");
 //!
 //! // Create an axum app router and mount our new registry on it.
@@ -750,7 +758,10 @@ mod tests {
     fn mk_anon_app() -> (Context, RouterIntoService<Body>) {
         let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
 
-        let auth = Arc::new(Anonymous::new(Permissions::ReadWrite, true));
+        let auth = Arc::new(Anonymous::new(
+            Permissions::ReadWrite,
+            Permissions::ReadWrite,
+        ));
         let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), auth)
             .expect("should not fail to create app");
         let router = registry
