@@ -63,7 +63,7 @@ async fn run() -> anyhow::Result<()> {
         Arc::new(password)
     } else {
         warn!("no password set, allowing access with any credential");
-        Arc::new(true)
+        Arc::new(auth::Permissions::ReadWrite)
     };
 
     let registry =
