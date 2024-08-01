@@ -295,6 +295,9 @@ impl ContainerRegistryBuilder {
 mod test_support {
     use std::sync::Arc;
 
+    use axum::{body::Body, routing::RouterIntoService};
+    use tower_http::trace::TraceLayer;
+
     use super::{
         auth::{self, Permissions},
         ContainerRegistry, ContainerRegistryBuilder,
@@ -307,6 +310,17 @@ mod test_support {
         pub registry: Arc<ContainerRegistry>,
         /// Storage used by the registry.
         pub temp_storage: Option<tempdir::TempDir>,
+    }
+
+    impl TestingContainerRegistry {
+        /// Creates an `axum` service for the registry.
+        pub fn make_service(&self) -> RouterIntoService<Body> {
+            self.registry
+                .clone()
+                .make_router()
+                .layer(TraceLayer::new_for_http())
+                .into_service::<Body>()
+        }
     }
 
     impl ContainerRegistryBuilder {
@@ -870,35 +884,6 @@ mod tests {
         )
     }
 
-    fn mk_anon_app() -> (Context, RouterIntoService<Body>) {
-        let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
-
-        let auth = Arc::new(Anonymous::new(
-            Permissions::ReadWrite,
-            Permissions::ReadWrite,
-        ));
-        let registry = ContainerRegistry::builder()
-            .storage(tmp.as_ref())
-            .auth_provider(auth)
-            .build()
-            .expect("failed to build registry");
-        let router = registry
-            .clone()
-            .make_router()
-            .layer(TraceLayer::new_for_http());
-
-        let service = router.into_service::<Body>();
-
-        (
-            Context {
-                registry,
-                _tmp: tmp,
-                password: "NOTSET".to_string(),
-            },
-            service,
-        )
-    }
-
     #[tokio::test]
     async fn refuses_access_without_valid_credentials() {
         let (ctx, mut service) = mk_test_app();
@@ -1128,7 +1113,9 @@ mod tests {
     /// Similar to `chunked_upload`, but uses no credentials to log in.
     #[tokio::test]
     async fn anonymous_upload() {
-        let (ctx, mut service) = mk_anon_app();
+        let ctx = ContainerRegistry::builder().build_for_testing();
+
+        let mut service = ctx.make_service();
         let app = service.ready().await.expect("could not launch service");
 
         // Step 1: POST for new blob upload.

@@ -49,7 +49,7 @@ tower-http = { version = "0.5.2", features = [ "trace" ] }
 [features]
 default = []
 bin = [ "anyhow", "structopt", "tempdir", "tower-http", "tracing-subscriber" ]
-test-support = [ "tempdir" ]
+test-support = [ "tempdir", "tower-http", "tracing-subscriber" ]
 
 [[bin]]
 name = "container-registry"
