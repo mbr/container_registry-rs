@@ -275,7 +275,7 @@ where
     }
 
     async fn blob_permissions(&self, creds: &ValidCredentials, blob: &ImageDigest) -> Permissions {
-        match dbg!(creds.extract_ref::<AnonCreds>()) {
+        match creds.extract_ref::<AnonCreds>() {
             AnonCreds::Anonymous => self.anon_permissions,
             _other => self.inner.blob_permissions(creds, blob).await,
         }
