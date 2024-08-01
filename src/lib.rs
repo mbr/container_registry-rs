@@ -295,7 +295,10 @@ impl ContainerRegistryBuilder {
 mod test_support {
     use std::sync::Arc;
 
-    use super::{auth, ContainerRegistry, ContainerRegistryBuilder};
+    use super::{
+        auth::{self, Permissions},
+        ContainerRegistry, ContainerRegistryBuilder,
+    };
 
     /// A handle to a container registry instantiated for testing.
 
@@ -320,8 +323,6 @@ mod test_support {
         ///
         /// Will panic if filesystem operations when setting up storage fail.
         pub fn build_for_testing(mut self) -> TestingContainerRegistry {
-            use crate::auth::{self, Permissions};
-
             let temp_storage = if self.storage.is_none() {
                 let temp_storage = tempdir::TempDir::new("container-registry-for-testing").expect(
                 "could not create temporary directory to host testing container registry instance",
