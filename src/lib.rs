@@ -7,6 +7,7 @@
 //! provider, which will accept any username and password combination as valid:
 //!
 //! ```
+//!# use std::sync::Arc;
 //!# use axum::{extract::DefaultBodyLimit, Router};
 //! use container_registry::auth;
 //! use sec::Secret;
@@ -17,15 +18,17 @@
 //!
 //! // Setup an auth scheme that allows uploading with a master password, read-only
 //! // access otherwise.
-//! let auth = auth::Anonymous::new(auth::Permissions::ReadOnly,
-//!                                 Secret::new("master password".to_owned()));
+//! let auth = Arc::new(auth::Anonymous::new(
+//!     auth::Permissions::ReadOnly,
+//!     Secret::new("master password".to_owned())
+//! ));
 //!
 //! // Instantiate the registry.
-//! let registry = container_registry::ContainerRegistry::new(
-//!     storage.path(),
-//!     Box::new(()),
-//!     std::sync::Arc::new(auth)
-//! ).expect("failed to instantiate registry");
+//! let registry = container_registry::ContainerRegistry::builder()
+//!     .storage(storage.path())  // Note: When testing, use `build_for_testing` instead.
+//!     .auth_provider(auth)
+//!     .build()
+//!     .expect("failed to instantiate registry");
 //!
 //! // Create an axum app router and mount our new registry on it.
 //! let app = Router::new()
@@ -45,6 +48,7 @@ mod www_authenticate;
 use std::{
     fmt::{self, Display},
     io,
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
 };
@@ -54,7 +58,7 @@ use self::{
     storage::{FilesystemStorage, ImageLocation, RegistryStorage},
     types::{ImageManifest, OciError, OciErrors},
 };
-use auth::MissingPermission;
+use auth::{MissingPermission, Permissions};
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -186,28 +190,11 @@ pub struct ContainerRegistry {
 }
 
 impl ContainerRegistry {
-    /// Creates a new instance of the container registry.
+    /// Creates a new builder for a [`ContainerRegistry`].
     ///
-    /// The instance uses the filesystem as the backend to store manifests and blobs, and requires
-    /// an [`AuthProvider`] and [`RegistryHooks`] to provided. Note that it is possible to supply
-    /// `()` for both `hooks` and `auth_provider`.
-    ///
-    /// The current implementation defaults to a filesystem based storage backend at
-    /// `storage_path`. It is conceivable to implement other backends, but currently not supported.
-    pub fn new<P>(
-        storage_path: P,
-        hooks: Box<dyn RegistryHooks>,
-        auth_provider: Arc<dyn AuthProvider>,
-    ) -> Result<Arc<Self>, FilesystemStorageError>
-    where
-        P: AsRef<std::path::Path>,
-    {
-        Ok(Arc::new(ContainerRegistry {
-            realm: "ContainerRegistry".to_string(),
-            auth_provider,
-            storage: Box::new(FilesystemStorage::new(storage_path)?),
-            hooks,
-        }))
+    /// See documentation of [`ContainerRegistryBuilder`] for details.
+    pub fn builder() -> ContainerRegistryBuilder {
+        ContainerRegistryBuilder::default()
     }
 
     /// Builds an [`axum::routing::Router`] for this registry.
@@ -239,6 +226,120 @@ impl ContainerRegistry {
             .with_state(self)
     }
 }
+
+/// Builder for a new instance of the container registry.
+///
+/// Requires a storage to be set, either by calling [`Self::storage`] or constructing using
+/// [`Self::build_for_testing()`], which requires the `test-support` feature and will use
+/// a temporary directory.
+///
+/// By default, no hooks are set up and the auth provider requires authentication, but does not
+/// grant access to anything.
+#[derive(Default)]
+pub struct ContainerRegistryBuilder {
+    /// Storage to use.
+    storage: Option<PathBuf>,
+    /// Hooks to use.
+    hooks: Option<Box<dyn RegistryHooks>>,
+    /// Auth provider to use.
+    auth_provider: Option<Arc<dyn AuthProvider>>,
+}
+
+impl ContainerRegistryBuilder {
+    /// Sets the auth provider for the new registry.
+    pub fn auth_provider(mut self, auth_provider: Arc<dyn AuthProvider>) -> Self {
+        self.auth_provider = Some(auth_provider.into());
+        self
+    }
+
+    /// Sets hooks for the new registry to call.
+    pub fn hooks(mut self, hooks: Box<dyn RegistryHooks>) -> Self {
+        self.hooks = Some(hooks.into());
+        self
+    }
+
+    /// Set the storage path for the new registry.
+    pub fn storage<P>(mut self, storage: P) -> Self
+    where
+        P: Into<PathBuf>,
+    {
+        self.storage = Some(storage.into());
+        self
+    }
+
+    /// Constructs a new registry.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if not storage has been set through [`Self::storage`].
+    pub fn build(mut self) -> Result<Arc<ContainerRegistry>, FilesystemStorageError> {
+        let storage_path = self
+            .storage
+            .expect("attempted to construct registry with no storage path");
+        let storage = Box::new(FilesystemStorage::new(storage_path)?);
+        let auth_provider = self
+            .auth_provider
+            .take()
+            .unwrap_or_else(|| Arc::new(Permissions::NoAccess));
+        let hooks = self.hooks.take().unwrap_or_else(|| Box::new(()));
+        Ok(Arc::new(ContainerRegistry {
+            realm: "ContainerRegistry".to_string(),
+            auth_provider,
+            storage,
+            hooks,
+        }))
+    }
+
+    /// Constructs a new registry for testing purposes.
+    ///
+    /// Similar to [`Self::build`], except
+    ///
+    /// * If no auth provider has been set, a default one granting **full write access** to any
+    ///   user, including anonymous ones.
+    /// * If no storage path has been set, creates a temporary directory for the registry, which
+    ///   will be cleaned up if `TestingContainerRegistry` is dropped.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if filesystem operations when setting up storage fail.
+    #[cfg(feature = "test-support")]
+    pub fn build_for_testing(mut self) -> TestingContainerRegistry {
+        let temp_storage = if self.storage.is_none() {
+            let temp_storage = tempdir::TempDir::new("container-registry-for-testing").expect(
+                "could not create temporary directory to host testing container registry instance",
+            );
+            self = self.storage(temp_storage.path());
+            Some(temp_storage)
+        } else {
+            None
+        };
+
+        if self.auth_provider.is_none() {
+            self = self.auth_provider(Arc::new(auth::Anonymous::new(
+                Permissions::ReadWrite,
+                Permissions::ReadWrite,
+            )));
+        }
+
+        let registry = self.build().expect("could not create registry");
+
+        TestingContainerRegistry {
+            registry,
+            temp_storage,
+        }
+    }
+}
+
+/// A handle to a container registry instantiated for testing.
+#[cfg(feature = "test-support")]
+pub struct TestingContainerRegistry {
+    /// Reference to the registry instance.
+    pub registry: Arc<ContainerRegistry>,
+    /// Storage used by the registry.
+    pub temp_storage: Option<tempdir::TempDir>,
+}
+
+// TODO: Send/Sync?
 
 /// Registry index
 ///
@@ -736,7 +837,10 @@ mod tests {
         let password = "random-test-password".to_owned();
         let master_key = Arc::new(Secret::new(password.clone()));
 
-        let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), master_key)
+        let registry = ContainerRegistry::builder()
+            .storage(tmp.as_ref())
+            .auth_provider(master_key)
+            .build()
             .expect("should not fail to create app");
         let router = registry
             .clone()
@@ -762,8 +866,11 @@ mod tests {
             Permissions::ReadWrite,
             Permissions::ReadWrite,
         ));
-        let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), auth)
-            .expect("should not fail to create app");
+        let registry = ContainerRegistry::builder()
+            .storage(tmp.as_ref())
+            .auth_provider(auth)
+            .build()
+            .expect("failed to build registry");
         let router = registry
             .clone()
             .make_router()

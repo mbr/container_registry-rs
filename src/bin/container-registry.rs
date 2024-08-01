@@ -2,7 +2,11 @@ use std::{fmt, fs, net::SocketAddr, path, process::ExitCode, sync::Arc};
 
 use anyhow::Context;
 use axum::{async_trait, extract::DefaultBodyLimit, Router};
-use container_registry::{auth::AuthProvider, hooks::RegistryHooks, storage::ManifestReference};
+use container_registry::{
+    auth::{self, AuthProvider},
+    hooks::RegistryHooks,
+    storage::ManifestReference,
+};
 use sec::Secret;
 use structopt::StructOpt;
 use tower_http::trace::TraceLayer;
@@ -66,9 +70,12 @@ async fn run() -> anyhow::Result<()> {
         Arc::new(auth::Permissions::ReadWrite)
     };
 
-    let registry =
-        container_registry::ContainerRegistry::new(storage, Box::new(LoggingHook), auth_provider)
-            .context("failed to instantiate registry")?;
+    let registry = container_registry::ContainerRegistry::builder()
+        .storage(storage)
+        .hooks(Box::new(LoggingHook))
+        .auth_provider(auth_provider)
+        .build()
+        .context("failed to instantiate registry")?;
 
     let app = Router::new()
         .merge(registry.make_router())

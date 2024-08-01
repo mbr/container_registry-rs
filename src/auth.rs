@@ -97,12 +97,12 @@ pub struct ValidCredentials(pub Box<dyn Any + Send + Sync>);
 impl ValidCredentials {
     /// Creates a new set of valid credentials.
     #[inline(always)]
-    fn new<T: Send + Sync + 'static>(inner: T) -> Self {
+    pub fn new<T: Send + Sync + 'static>(inner: T) -> Self {
         ValidCredentials(Box::new(inner))
     }
 
     /// Extracts a reference to the contained inner type.
-    fn extract_ref<T: 'static>(&self) -> &T {
+    pub fn extract_ref<T: 'static>(&self) -> &T {
         self.0.downcast_ref::<T>().expect("could not downcast `ValidCredentials` into expected type - was auth provider called with the wrong set of credentials?")
     }
 }

@@ -10,6 +10,7 @@
 ### Changed
 
 * The `AuthProvider` API has changed to also include permissions.
+* `Registry::new` has been replaced by a builder pattern, see `Registry::builder`.
 
 ### Removed
 

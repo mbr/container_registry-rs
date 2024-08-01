@@ -9,6 +9,9 @@ version = "0.1.2"
 edition = "2021"
 license = "MIT"
 
+[package.metadata.docs.rs]
+features = [ "test-support" ]
+
 [dependencies]
 anyhow = { version = "1.0.86", optional = true }
 axum = { version = "0.7.5", features = [ "tracing" ] }
@@ -46,6 +49,7 @@ tower-http = { version = "0.5.2", features = [ "trace" ] }
 [features]
 default = []
 bin = [ "anyhow", "structopt", "tempdir", "tower-http", "tracing-subscriber" ]
+test-support = [ "tempdir" ]
 
 [[bin]]
 name = "container-registry"
