@@ -695,6 +695,7 @@ mod tests {
     use tower_http::trace::TraceLayer;
 
     use crate::{
+        auth::{Anonymous, Permissions},
         storage::{ImageLocation, ManifestReference, Reference},
         ImageDigest,
     };
@@ -741,6 +742,29 @@ mod tests {
                 registry,
                 _tmp: tmp,
                 password,
+            },
+            service,
+        )
+    }
+
+    fn mk_anon_app() -> (Context, RouterIntoService<Body>) {
+        let tmp = TempDir::new("rockslide-test").expect("could not create temporary directory");
+
+        let auth = Arc::new(Anonymous::new(Permissions::ReadWrite, true));
+        let registry = ContainerRegistry::new(tmp.as_ref(), Box::new(()), auth)
+            .expect("should not fail to create app");
+        let router = registry
+            .clone()
+            .make_router()
+            .layer(TraceLayer::new_for_http());
+
+        let service = router.into_service::<Body>();
+
+        (
+            Context {
+                registry,
+                _tmp: tmp,
+                password: "NOTSET".to_string(),
             },
             service,
         )
@@ -969,6 +993,129 @@ mod tests {
                 .expect("failed to get reference by digest")
                 .expect("missing reference by digest"),
             RAW_MANIFEST
+        );
+    }
+
+    /// Similar to `chunked_upload`, but uses no credentials to log in.
+    #[tokio::test]
+    async fn anonymous_upload() {
+        let (ctx, mut service) = mk_anon_app();
+        let app = service.ready().await.expect("could not launch service");
+
+        // Step 1: POST for new blob upload.
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/tests/sample/blobs/uploads/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let put_location = response
+            .headers()
+            .get(LOCATION)
+            .expect("expected location header for blob upload")
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        // Step 2: PATCH blobs.
+        let mut sent = 0;
+        for chunk in RAW_IMAGE.chunks(32) {
+            assert!(!chunk.is_empty());
+            let range = format!("{sent}-{}", chunk.len() - 1);
+            sent += chunk.len();
+
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("PATCH")
+                        .header(CONTENT_LENGTH, chunk.len())
+                        .header(CONTENT_RANGE, range)
+                        .uri(&put_location)
+                        .body(Body::from(chunk))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+
+        // Step 3: PUT without (!) final body -- we do not support putting the final piece in `PUT`.
+        let response = app
+            .call(
+                Request::builder()
+                    .method("PUT")
+                    .uri(put_location + "?digest=" + IMAGE_DIGEST.to_string().as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Check the blob is available after.
+        let blob_location = format!("/v2/tests/sample/blobs/{}", IMAGE_DIGEST);
+        assert!(&ctx
+            .registry
+            .storage
+            .get_blob_reader(IMAGE_DIGEST.digest)
+            .await
+            .expect("could not access stored blob")
+            .is_some());
+
+        // Step 4: Client verifies existence of blob through `HEAD` request.
+        let response = app
+            .call(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(blob_location)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("Docker-Content-Digest")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            IMAGE_DIGEST.to_string()
+        );
+
+        // Step 5: Upload the manifest
+        let manifest_by_tag_location = "/v2/tests/sample/manifests/latest";
+
+        let response = app
+            .call(
+                Request::builder()
+                    .method("PUT")
+                    .uri(manifest_by_tag_location)
+                    .body(Body::from(RAW_MANIFEST))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get("Docker-Content-Digest")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            MANIFEST_DIGEST.to_string()
         );
     }
 

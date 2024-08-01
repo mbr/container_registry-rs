@@ -8,6 +8,9 @@
 //!           and example code. Will not accept missing credentials.
 //! * `HashMap<String, Secret<String>>`: A mapping of usernames to (unencrypted) passwords.
 //! * `Secret<String>`: Master password, ignores all usernames and just compares the password.
+//! * `Anonymous`: A decorator that wraps around another [`AuthProvider`], will grant a fixed set
+//!                of permissions to anonymous user, while deferring everything else to the inner
+//!                provider.
 //!
 //! All the above implementations deal with **authentication** only, once authorized, full
 //! write access to everything is granted.
@@ -84,6 +87,10 @@ impl<S> FromRequestParts<S> for Unverified {
 }
 
 /// A set of credentials that has been validated.
+///
+/// Every [`AuthProvider`] is free to put [`Any`] type in the credentials and is guaranteed
+/// to be passed back only instances it created itself. Use [`Self::extract_ref`] to retrieve the
+/// passed in actual type.
 #[derive(Debug)]
 pub struct ValidCredentials(pub Box<dyn Any + Send + Sync>);
 
@@ -92,6 +99,11 @@ impl ValidCredentials {
     #[inline(always)]
     fn new<T: Send + Sync + 'static>(inner: T) -> Self {
         ValidCredentials(Box::new(inner))
+    }
+
+    /// Extracts a reference to the contained inner type.
+    fn extract_ref<T: 'static>(&self) -> &T {
+        self.0.downcast_ref::<T>().expect("could not downcast `ValidCredentials` into expected type - was auth provider called with the wrong set of credentials?")
     }
 }
 
@@ -208,6 +220,66 @@ pub trait AuthProvider: Send + Sync {
     /// involve the uploader sending a hash beforehand, thus this function cannot be used to
     /// implement a blacklist for specific blobs.
     async fn blob_permissions(&self, creds: &ValidCredentials, blob: &ImageDigest) -> Permissions;
+}
+
+/// Anonymous access auth provider.
+///
+/// The [`Anonymous`] grants a fixed set of permissions to anonymous users, i.e. those not
+/// supplying any credentials at all. For others it defers to the wrapped [`AuthProvider`] `A`.
+#[derive(Debug)]
+pub struct Anonymous<A> {
+    anon_permissions: Permissions,
+    inner: A,
+}
+
+impl<A> Anonymous<A> {
+    /// Creates a new anonymous auth provider that decorates `inner`.
+    pub fn new(anon_permissions: Permissions, inner: A) -> Self {
+        Self {
+            anon_permissions,
+            inner,
+        }
+    }
+}
+
+/// A set of possibly anonymous credentials.
+#[derive(Debug)]
+enum AnonCreds {
+    /// No credentials provided, user is anonymous.
+    Anonymous,
+    /// Valid credentials supplied by inner auth provider.
+    Valid(ValidCredentials),
+}
+
+#[async_trait]
+impl<A> AuthProvider for Anonymous<A>
+where
+    A: AuthProvider,
+{
+    async fn check_credentials(&self, unverified: &Unverified) -> Option<ValidCredentials> {
+        Some(ValidCredentials::new(match unverified {
+            Unverified::NoCredentials => AnonCreds::Anonymous,
+            _other => AnonCreds::Valid(self.inner.check_credentials(unverified).await?),
+        }))
+    }
+
+    async fn image_permissions(
+        &self,
+        creds: &ValidCredentials,
+        image: &ImageLocation,
+    ) -> Permissions {
+        match dbg!(creds.extract_ref::<AnonCreds>()) {
+            AnonCreds::Anonymous => self.anon_permissions,
+            _other => self.inner.image_permissions(creds, image).await,
+        }
+    }
+
+    async fn blob_permissions(&self, creds: &ValidCredentials, blob: &ImageDigest) -> Permissions {
+        match dbg!(creds.extract_ref::<AnonCreds>()) {
+            AnonCreds::Anonymous => self.anon_permissions,
+            _other => self.inner.blob_permissions(creds, blob).await,
+        }
+    }
 }
 
 #[async_trait]
