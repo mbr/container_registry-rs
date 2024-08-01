@@ -319,7 +319,6 @@ mod test_support {
         /// # Panics
         ///
         /// Will panic if filesystem operations when setting up storage fail.
-        #[cfg(any(feature = "test-support", test))]
         pub fn build_for_testing(mut self) -> TestingContainerRegistry {
             use crate::auth::{self, Permissions};
 
