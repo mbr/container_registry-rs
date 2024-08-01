@@ -268,7 +268,7 @@ where
         creds: &ValidCredentials,
         image: &ImageLocation,
     ) -> Permissions {
-        match dbg!(creds.extract_ref::<AnonCreds>()) {
+        match creds.extract_ref::<AnonCreds>() {
             AnonCreds::Anonymous => self.anon_permissions,
             _other => self.inner.image_permissions(creds, image).await,
         }
