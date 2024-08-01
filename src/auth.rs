@@ -32,11 +32,16 @@ use super::{
 
 /// A set of credentials supplied that has not been verified.
 #[derive(Debug)]
-pub struct UnverifiedCredentials {
-    /// The given username.
-    pub username: String,
-    /// The provided password.
-    pub password: Secret<String>,
+pub enum UnverifiedCredentials {
+    /// A set of username and password credentials.
+    UsernameAndPassword {
+        /// The given username.
+        username: String,
+        /// The provided password.
+        password: Secret<String>,
+    },
+    /// No credentials were given.
+    NoCredentials,
 }
 
 #[async_trait]
@@ -48,7 +53,7 @@ impl<S> FromRequestParts<S> for UnverifiedCredentials {
             let (_unparsed, basic) = www_authenticate::basic_auth_response(auth_header.as_bytes())
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-            Ok(UnverifiedCredentials {
+            Ok(UnverifiedCredentials::UsernameAndPassword {
                 username: str::from_utf8(&basic.username)
                     .map_err(|_| StatusCode::BAD_REQUEST)?
                     .to_owned(),
@@ -59,27 +64,17 @@ impl<S> FromRequestParts<S> for UnverifiedCredentials {
                 ),
             })
         } else {
-            Err(StatusCode::UNAUTHORIZED)
+            Ok(UnverifiedCredentials::NoCredentials)
         }
     }
 }
 
 /// A set of credentials that has been validated.
-///
-/// Newtype used to avoid accidentally granting access from unverified credentials.
 #[derive(Debug)]
-pub struct ValidUser(String);
-
-impl ValidUser {
-    /// Returns the valid user's username.
-    #[inline(always)]
-    pub fn username(&self) -> &str {
-        &self.0
-    }
-}
+pub struct ValidCredentials(Box<dyn Any + Send>);
 
 #[async_trait]
-impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
+impl FromRequestParts<Arc<ContainerRegistry>> for ValidCredentials {
     type Rejection = StatusCode;
 
     async fn from_request_parts(
@@ -89,15 +84,9 @@ impl FromRequestParts<Arc<ContainerRegistry>> for ValidUser {
         let unverified = UnverifiedCredentials::from_request_parts(parts, state).await?;
 
         // We got a set of credentials, now verify.
-        if !state
-            .auth_provider
-            .check_credentials(&unverified)
-            .await
-            .is_some()
-        {
-            Err(StatusCode::UNAUTHORIZED)
-        } else {
-            Ok(Self(unverified.username))
+        match state.auth_provider.check_credentials(&unverified).await {
+            Some(creds) => Ok(Self(creds)),
+            None => Err(StatusCode::UNAUTHORIZED),
         }
     }
 }
@@ -111,12 +100,18 @@ pub trait AuthProvider: Send + Sync {
     ///
     /// Must return `None` if the credentials are not valid at all, or may return any set of
     /// provider specific credentials (e.g. a username or ID) if they are valid.
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<Box<dyn Any>>;
+    async fn check_credentials(
+        &self,
+        creds: &UnverifiedCredentials,
+    ) -> Option<Box<dyn Any + Send + Send>>;
 }
 
 #[async_trait]
 impl AuthProvider for bool {
-    async fn check_credentials(&self, _creds: &UnverifiedCredentials) -> Option<Box<dyn Any>> {
+    async fn check_credentials(
+        &self,
+        _creds: &UnverifiedCredentials,
+    ) -> Option<Box<dyn Any + Send>> {
         if *self {
             Some(Box::new(()))
         } else {
@@ -129,23 +124,26 @@ impl AuthProvider for bool {
 impl AuthProvider for HashMap<String, Secret<String>> {
     async fn check_credentials(
         &self,
-        UnverifiedCredentials {
-            username: unverified_username,
-            password: unverified_password,
-        }: &UnverifiedCredentials,
-    ) -> Option<Box<dyn Any>> {
-        if let Some(correct_password) = self.get(unverified_username) {
-            if constant_time_eq::constant_time_eq(
-                correct_password.reveal().as_bytes(),
-                unverified_password.reveal().as_bytes(),
-            ) {
-                return Some(Box::new(unverified_username.clone()));
-            } else {
-                return None;
-            }
-        }
+        unverified: &UnverifiedCredentials,
+    ) -> Option<Box<dyn Any + Send>> {
+        match unverified {
+            UnverifiedCredentials::UsernameAndPassword {
+                username: unverified_username,
+                password: unverified_password,
+            } => {
+                if let Some(correct_password) = self.get(unverified_username) {
+                    if constant_time_eq::constant_time_eq(
+                        correct_password.reveal().as_bytes(),
+                        unverified_password.reveal().as_bytes(),
+                    ) {
+                        return Some(Box::new(unverified_username.clone()));
+                    }
+                }
 
-        None
+                None
+            }
+            UnverifiedCredentials::NoCredentials => None,
+        }
     }
 }
 
@@ -155,7 +153,10 @@ where
     T: AuthProvider,
 {
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<Box<dyn Any>> {
+    async fn check_credentials(
+        &self,
+        creds: &UnverifiedCredentials,
+    ) -> Option<Box<dyn Any + Send>> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
@@ -166,7 +167,10 @@ where
     T: AuthProvider,
 {
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<Box<dyn Any>> {
+    async fn check_credentials(
+        &self,
+        creds: &UnverifiedCredentials,
+    ) -> Option<Box<dyn Any + Send>> {
         <T as AuthProvider>::check_credentials(self, creds).await
     }
 }
@@ -174,14 +178,25 @@ where
 #[async_trait]
 impl AuthProvider for Secret<String> {
     #[inline(always)]
-    async fn check_credentials(&self, creds: &UnverifiedCredentials) -> Option<Box<dyn Any>> {
-        if constant_time_eq::constant_time_eq(
-            creds.password.reveal().as_bytes(),
-            self.reveal().as_bytes(),
-        ) {
-            Some(Box::new(()))
-        } else {
-            None
+    async fn check_credentials(
+        &self,
+        creds: &UnverifiedCredentials,
+    ) -> Option<Box<dyn Any + Send>> {
+        match creds {
+            UnverifiedCredentials::UsernameAndPassword {
+                username: _,
+                password,
+            } => {
+                if constant_time_eq::constant_time_eq(
+                    password.reveal().as_bytes(),
+                    self.reveal().as_bytes(),
+                ) {
+                    Some(Box::new(()))
+                } else {
+                    None
+                }
+            }
+            UnverifiedCredentials::NoCredentials => None,
         }
     }
 }

@@ -42,7 +42,7 @@ use std::{
 };
 
 use self::{
-    auth::ValidUser,
+    auth::ValidCredentials,
     storage::{FilesystemStorage, ImageLocation, RegistryStorage},
     types::{ImageManifest, OciError, OciErrors},
 };
@@ -259,7 +259,7 @@ async fn index_v2(
 async fn blob_check(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
-    _auth: ValidUser,
+    _auth: ValidCredentials,
 ) -> Result<Response, RegistryError> {
     if let Some(metadata) = registry.storage.get_blob_metadata(image.digest).await? {
         Ok(Response::builder()
@@ -281,7 +281,7 @@ async fn blob_check(
 async fn blob_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((_, _, image)): Path<(String, String, ImageDigest)>,
-    _auth: ValidUser,
+    _auth: ValidCredentials,
 ) -> Result<Response, RegistryError> {
     // TODO: Get size for `Content-length` header.
 
@@ -304,7 +304,7 @@ async fn blob_get(
 async fn upload_new(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
-    _auth: ValidUser,
+    _auth: ValidCredentials,
 ) -> Result<UploadState, RegistryError> {
     // Initiate a new upload
     let upload = registry.storage.begin_new_upload().await?;
@@ -467,7 +467,7 @@ async fn upload_add_chunk(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(location): Path<ImageLocation>,
     Path(UploadId { upload }): Path<UploadId>,
-    _auth: ValidUser,
+    _auth: ValidCredentials,
     request: axum::extract::Request,
 ) -> Result<UploadState, RegistryError> {
     // Check if we have a range - if so, its an unsupported feature, namely monolith uploads.
@@ -518,7 +518,7 @@ async fn upload_finalize(
     State(registry): State<Arc<ContainerRegistry>>,
     Path((repository, image, upload)): Path<(String, String, Uuid)>,
     Query(DigestQuery { digest }): Query<DigestQuery>,
-    _auth: ValidUser,
+    _auth: ValidCredentials,
     request: axum::extract::Request,
 ) -> Result<Response<Body>, RegistryError> {
     let location = ImageLocation::new(repository, image);
@@ -560,7 +560,7 @@ async fn upload_finalize(
 async fn manifest_put(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
-    _auth: ValidUser,
+    _auth: ValidCredentials,
     image_manifest_json: String,
 ) -> Result<Response<Body>, RegistryError> {
     let digest = registry
@@ -597,7 +597,7 @@ async fn manifest_put(
 async fn manifest_get(
     State(registry): State<Arc<ContainerRegistry>>,
     Path(manifest_reference): Path<ManifestReference>,
-    _auth: ValidUser,
+    _auth: ValidCredentials,
 ) -> Result<Response<Body>, RegistryError> {
     let manifest_json = registry
         .storage
