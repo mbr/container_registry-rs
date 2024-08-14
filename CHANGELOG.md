@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+* The registry now allows access to the root endpoint for anonymous users if access is granted.
+
 ## [0.2.0] - 2024-08-01
 
 ### Added
