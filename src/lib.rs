@@ -305,13 +305,13 @@ async fn index_v2(
 ) -> Response<Body> {
     let realm = &registry.realm;
 
-    // TODO: This code duplicates some of the extraction logic of `Unverified` -- and how does it work for anonymous access?
-    if !unverified.is_no_credentials()
-        && registry
-            .auth_provider
-            .check_credentials(&unverified)
-            .await
-            .is_some()
+    // Both anonymous and named users should be verified to be able to get index. Restricted access
+    // is handled identically for both via the rules set within the registry constructor.
+    if registry
+        .auth_provider
+        .check_credentials(&unverified)
+        .await
+        .is_some()
     {
         return Response::builder()
             .status(StatusCode::OK)
