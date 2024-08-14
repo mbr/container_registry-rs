@@ -257,10 +257,10 @@ where
     A: AuthProvider,
 {
     async fn check_credentials(&self, unverified: &Unverified) -> Option<ValidCredentials> {
-        Some(ValidCredentials::new(match unverified {
-            Unverified::NoCredentials => AnonCreds::Anonymous,
-            _other => AnonCreds::Valid(self.inner.check_credentials(unverified).await?),
-        }))
+        match unverified {
+            Unverified::NoCredentials => Some(ValidCredentials::new(AnonCreds::Anonymous)),
+            _other => self.inner.check_credentials(unverified).await,
+        }
     }
 
     async fn image_permissions(
