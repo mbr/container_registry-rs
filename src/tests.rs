@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tower::{util::ServiceExt, Service};
 
 use crate::{
+    auth::Anonymous,
     storage::{ImageLocation, ManifestReference, Reference},
     test_support::TestingContainerRegistry,
     ImageDigest,
@@ -40,6 +41,15 @@ const TEST_PASSWORD: &str = "random-test-password";
 fn registry_with_test_password() -> TestingContainerRegistry {
     ContainerRegistry::builder()
         .auth_provider(Arc::new(Secret::new(TEST_PASSWORD.to_owned())))
+        .build_for_testing()
+}
+
+fn registry_with_test_password_and_full_anon_access() -> TestingContainerRegistry {
+    ContainerRegistry::builder()
+        .auth_provider(Arc::new(Anonymous::new(
+            crate::auth::Permissions::ReadWrite,
+            Secret::new(TEST_PASSWORD.to_owned()),
+        )))
         .build_for_testing()
 }
 
@@ -92,6 +102,57 @@ async fn refuses_access_without_valid_credentials() {
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::UNAUTHORIZED)
+    }
+}
+
+#[tokio::test]
+async fn allows_anon_access_if_configured() {
+    let ctx = registry_with_test_password_and_full_anon_access();
+    let mut service = ctx.make_service();
+    let app = service.ready().await.expect("could not launch service");
+
+    let targets = [("GET", "/v2/")];
+
+    for (method, endpoint) in targets.into_iter() {
+        // Wrong credentials should still not grant access.
+        let response = app
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(endpoint)
+                    .header(AUTHORIZATION, invalid_basic_auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Valid credentials should grant access
+        let response = app
+            .call(
+                Request::builder()
+                    .uri("/v2/")
+                    .header(AUTHORIZATION, basic_auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // No cretentials should also grant access
+        let response = app
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(endpoint)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
 
